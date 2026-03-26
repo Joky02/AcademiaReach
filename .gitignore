@@ -1,0 +1,32 @@
+# ── 敏感配置（含 API Key / 密码）──
+backend/config/config.yaml
+backend/config/cv_*.pdf
+
+# ── Python ──
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+*.db
+
+# ── 虚拟环境 ──
+.venv/
+venv/
+env/
+
+# ── Node / 前端 ──
+frontend/node_modules/
+frontend/dist/
+
+# ── IDE ──
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# ── 系统 ──
+Thumbs.db

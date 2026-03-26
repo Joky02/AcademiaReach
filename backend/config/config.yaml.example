@@ -1,0 +1,71 @@
+# ========================
+# 套磁 Agent 系统 - 主配置
+# ========================
+# 使用前请复制此文件为 config.yaml 并填入真实信息:
+#   cp config.yaml.example config.yaml
+
+# LLM 配置
+llm:
+  # 可选: openai, deepseek, ollama
+  provider: "openai"
+  # OpenAI 配置
+  openai:
+    api_key: "sk-your-openai-api-key"
+    model: "gpt-4o"
+    base_url: "https://api.openai.com/v1"
+  # DeepSeek 配置
+  deepseek:
+    api_key: "sk-your-deepseek-api-key"
+    model: "deepseek-chat"
+    base_url: "https://api.deepseek.com/v1"
+  # Ollama 本地模型配置
+  ollama:
+    model: "llama3"
+    base_url: "http://localhost:11434"
+
+# 搜索配置
+search:
+  # Serper API Key (https://serper.dev)
+  serper_api_key: "your-serper-api-key"
+  # 研究方向关键词
+  keywords:
+    - "machine learning"
+    - "natural language processing"
+  # 目标地区偏好
+  regions:
+    - "US"
+    - "UK"
+    - "China"
+  # 单次搜索最大导师数量
+  max_professors: 20
+
+# SMTP 发件配置
+smtp:
+  host: "smtp.gmail.com"
+  port: 587
+  username: "your_email@gmail.com"
+  password: "your-app-password"
+  use_tls: true
+
+# IMAP 收件配置（用于回复跟踪）
+imap:
+  host: "imap.gmail.com"
+  port: 993
+  username: "your_email@gmail.com"
+  password: "your-app-password"
+  use_ssl: true
+  # 轮询间隔（秒）
+  poll_interval: 300
+
+# Agent 行为自定义（可选，留空使用默认行为）
+prompts:
+  # 搜索偏好：告诉搜索 Agent 你想找什么样的导师
+  search_preference: ""
+  # 中文邮件风格
+  compose_style_cn: ""
+  # 英文邮件风格
+  compose_style_en: ""
+  # 中文邮件额外要求
+  compose_extra_cn: ""
+  # 英文邮件额外要求
+  compose_extra_en: ""
