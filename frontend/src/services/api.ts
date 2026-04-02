@@ -12,6 +12,11 @@ export const getStats = () => api.get('/stats')
 export const getProfessors = () => api.get('/professors')
 export const addProfessor = (data: any) => api.post('/professors', data)
 export const deleteProfessor = (id: number) => api.delete(`/professors/${id}`)
+export const updateProfessor = (id: number, data: any) => api.put(`/professors/${id}`, data)
+export const toggleStar = (id: number) => api.put(`/professors/${id}/star`)
+export const updateProfTags = (id: number, tags: string[]) =>
+  api.put(`/professors/${id}/tags`, { tags })
+export const enrichProfessor = (id: number) => api.post(`/professors/${id}/enrich`)
 export const startSearch = (data: any) => api.post('/search/start', data)
 export const stopSearch = () => api.post('/search/stop')
 
@@ -20,6 +25,7 @@ export const getDrafts = (status?: string) =>
   api.get('/drafts', { params: status ? { status } : {} })
 export const getDraft = (id: number) => api.get(`/drafts/${id}`)
 export const updateDraft = (id: number, data: any) => api.put(`/drafts/${id}`, data)
+export const deleteDraft = (id: number) => api.delete(`/drafts/${id}`)
 export const startCompose = (professorIds?: number[]) =>
   api.post('/compose/start', { professor_ids: professorIds || null })
 

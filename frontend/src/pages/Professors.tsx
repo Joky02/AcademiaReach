@@ -2,9 +2,11 @@ import { useState, useEffect, useMemo } from 'react'
 import {
   Search, Trash2, ExternalLink, Loader2, UserPlus, Globe,
   MapPin, Building2, Mail, FileText, Send, ChevronDown, ChevronRight, Bot,
+  Star, Tag, Plus, X, RefreshCw,
 } from 'lucide-react'
 import {
   getProfessors, addProfessor, deleteProfessor, getDrafts,
+  toggleStar, updateProfTags, enrichProfessor,
 } from '../services/api'
 import ProfessorDetail from '../components/ProfessorDetail'
 
@@ -24,6 +26,20 @@ const REGION_LABELS: Record<string, string> = {
   US: '美国', UK: '英国', CA: '加拿大', AU: '澳大利亚',
 }
 const REGION_ORDER = ['China', 'Hong Kong', 'Singapore', 'US', 'UK', 'CA', 'AU']
+
+// 预设标签及颜色
+const PRESET_TAGS: Record<string, { label: string; color: string }> = {
+  '院士': { label: '院士', color: 'bg-red-100 text-red-700 border-red-200' },
+  '杰青': { label: '杰青', color: 'bg-orange-100 text-orange-700 border-orange-200' },
+  '优青': { label: '优青', color: 'bg-amber-100 text-amber-700 border-amber-200' },
+  '长江学者': { label: '长江学者', color: 'bg-yellow-100 text-yellow-700 border-yellow-200' },
+  '青千': { label: '青千', color: 'bg-lime-100 text-lime-700 border-lime-200' },
+  'Fellow': { label: 'Fellow', color: 'bg-blue-100 text-blue-700 border-blue-200' },
+  'AP': { label: 'AP', color: 'bg-sky-100 text-sky-700 border-sky-200' },
+  'Associate Prof': { label: 'Assoc Prof', color: 'bg-teal-100 text-teal-700 border-teal-200' },
+  'Full Prof': { label: 'Full Prof', color: 'bg-indigo-100 text-indigo-700 border-indigo-200' },
+  '博导': { label: '博导', color: 'bg-purple-100 text-purple-700 border-purple-200' },
+}
 
 export default function Professors({
   wsMessages, searching, searchLog, onStartSearch, onOpenSearchModal, composing, onStartCompose,
@@ -47,6 +63,12 @@ export default function Professors({
 
   // Collapsed regions
   const [collapsedRegions, setCollapsedRegions] = useState<Set<string>>(new Set())
+
+  // Tag picker
+  const [tagPickerProf, setTagPickerProf] = useState<number | null>(null)
+
+  // Enriching professors (loading state)
+  const [enrichingIds, setEnrichingIds] = useState<Set<number>>(new Set())
 
   const fetchData = () => {
     Promise.all([getProfessors(), getDrafts()])
@@ -106,11 +128,20 @@ export default function Professors({
   }
 
   const handleAdd = async () => {
-    if (!form.name || !form.email || !form.university) return
-    await addProfessor(form)
+    if (!form.name || !form.university) return
+    const res = await addProfessor(form)
     setForm({ name: '', email: '', university: '', department: '', homepage: '', research_summary: '', region: '' })
     setShowAdd(false)
     fetchData()
+    // Auto-enrich in background
+    const newId = res.data?.id
+    if (newId) {
+      setEnrichingIds((prev) => new Set(prev).add(newId))
+      enrichProfessor(newId)
+        .then(() => fetchData())
+        .catch(() => {})
+        .finally(() => setEnrichingIds((prev) => { const s = new Set(prev); s.delete(newId); return s }))
+    }
   }
 
   const handleDelete = async (e: React.MouseEvent, id: number) => {
@@ -118,6 +149,50 @@ export default function Professors({
     if (!confirm('确定删除这位导师吗？')) return
     await deleteProfessor(id)
     fetchData()
+  }
+
+  const handleEnrich = async (e: React.MouseEvent, id: number) => {
+    e.stopPropagation()
+    setEnrichingIds((prev) => new Set(prev).add(id))
+    try {
+      await enrichProfessor(id)
+      fetchData()
+    } catch { /* ignore */ }
+    setEnrichingIds((prev) => { const s = new Set(prev); s.delete(id); return s })
+  }
+
+  const handleToggleStar = async (e: React.MouseEvent, id: number) => {
+    e.stopPropagation()
+    await toggleStar(id)
+    fetchData()
+  }
+
+  const handleAddTag = async (e: React.MouseEvent, profId: number, tag: string) => {
+    e.stopPropagation()
+    const prof = professors.find((p) => p.id === profId)
+    if (!prof) return
+    const existing: string[] = parseTags(prof.tags)
+    if (existing.includes(tag)) return
+    await updateProfTags(profId, [...existing, tag])
+    setTagPickerProf(null)
+    fetchData()
+  }
+
+  const handleRemoveTag = async (e: React.MouseEvent, profId: number, tag: string) => {
+    e.stopPropagation()
+    const prof = professors.find((p) => p.id === profId)
+    if (!prof) return
+    const existing: string[] = parseTags(prof.tags)
+    await updateProfTags(profId, existing.filter((t) => t !== tag))
+    fetchData()
+  }
+
+  const parseTags = (raw: any): string[] => {
+    if (Array.isArray(raw)) return raw
+    if (typeof raw === 'string') {
+      try { return JSON.parse(raw) } catch { return [] }
+    }
+    return []
   }
 
   const toggleRegion = (region: string) => {
@@ -189,10 +264,10 @@ export default function Professors({
         <div className="rounded-xl bg-white p-6 shadow-sm border border-gray-100">
           <h3 className="mb-4 text-lg font-semibold">手动添加导师</h3>
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {(['name', 'email', 'university', 'department', 'homepage', 'region'] as const).map((field) => (
+            {(['name', 'university', 'email', 'department', 'homepage', 'region'] as const).map((field) => (
               <div key={field}>
                 <label className="block text-sm font-medium text-gray-700 mb-1">
-                  {{name:'姓名*',email:'邮箱*',university:'学校*',department:'院系',homepage:'主页',region:'地区'}[field]}
+                  {{name:'姓名*',university:'学校*',email:'邮箱（可选，自动补全）',department:'院系',homepage:'主页',region:'地区'}[field]}
                 </label>
                 <input
                   type="text"
@@ -283,6 +358,13 @@ export default function Professors({
                                   onClick={() => setSelectedProf(p)}
                                   className="group relative flex items-start gap-3 rounded-xl border border-gray-200 p-4 cursor-pointer hover:border-indigo-300 hover:shadow-md transition-all"
                                 >
+                                  {/* Star button */}
+                                  <button
+                                    onClick={(e) => handleToggleStar(e, p.id)}
+                                    className="absolute top-2 left-2 rounded-md p-1 transition-all"
+                                  >
+                                    <Star className={`h-4 w-4 ${p.is_starred ? 'fill-yellow-400 text-yellow-400' : 'text-gray-300 opacity-0 group-hover:opacity-100 hover:text-yellow-400'}`} />
+                                  </button>
                                   {/* Avatar */}
                                   <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-indigo-400 to-purple-500 text-sm font-bold text-white">
                                     {initials(p.name)}
@@ -305,8 +387,35 @@ export default function Professors({
                                     {p.research_summary && (
                                       <p className="mt-0.5 text-xs text-gray-500 line-clamp-2">{p.research_summary}</p>
                                     )}
+                                    {/* Tags */}
+                                    {(() => {
+                                      const tags = parseTags(p.tags)
+                                      return tags.length > 0 ? (
+                                        <div className="mt-1.5 flex flex-wrap gap-1">
+                                          {tags.map((tag: string) => {
+                                            const preset = PRESET_TAGS[tag]
+                                            return (
+                                              <span
+                                                key={tag}
+                                                className={`inline-flex items-center gap-0.5 rounded-full border px-1.5 py-0.5 text-[10px] font-medium ${
+                                                  preset ? preset.color : 'bg-gray-100 text-gray-600 border-gray-200'
+                                                }`}
+                                              >
+                                                {preset ? preset.label : tag}
+                                                <button
+                                                  onClick={(e) => handleRemoveTag(e, p.id, tag)}
+                                                  className="ml-0.5 rounded-full hover:bg-black/10 p-0.5"
+                                                >
+                                                  <X className="h-2 w-2" />
+                                                </button>
+                                              </span>
+                                            )
+                                          })}
+                                        </div>
+                                      ) : null
+                                    })()}
                                     {/* Status badges */}
-                                    <div className="mt-2 flex flex-wrap gap-1.5">
+                                    <div className="mt-1.5 flex flex-wrap gap-1.5 items-center">
                                       {newProfIds.has(p.id) && (
                                         <span className="inline-flex items-center rounded-full bg-indigo-500 px-1.5 py-0.5 text-[10px] font-bold text-white">
                                           新
@@ -327,8 +436,54 @@ export default function Professors({
                                           <Mail className="h-2.5 w-2.5" /> 未生成
                                         </span>
                                       )}
+                                      {/* Add tag button */}
+                                      <div className="relative">
+                                        <button
+                                          onClick={(e) => { e.stopPropagation(); setTagPickerProf(tagPickerProf === p.id ? null : p.id) }}
+                                          className="inline-flex items-center gap-0.5 rounded-full border border-dashed border-gray-300 px-1.5 py-0.5 text-[10px] text-gray-400 hover:border-indigo-400 hover:text-indigo-500 transition-colors"
+                                        >
+                                          <Tag className="h-2.5 w-2.5" />
+                                          <Plus className="h-2 w-2" />
+                                        </button>
+                                        {/* Tag picker dropdown */}
+                                        {tagPickerProf === p.id && (
+                                          <div
+                                            className="absolute left-0 top-full mt-1 z-50 w-36 rounded-lg bg-white border border-gray-200 shadow-lg py-1"
+                                            onClick={(e) => e.stopPropagation()}
+                                          >
+                                            {Object.entries(PRESET_TAGS)
+                                              .filter(([key]) => !parseTags(p.tags).includes(key))
+                                              .map(([key, { label, color }]) => (
+                                                <button
+                                                  key={key}
+                                                  onClick={(e) => handleAddTag(e, p.id, key)}
+                                                  className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-gray-50 transition-colors"
+                                                >
+                                                  <span className={`inline-block rounded-full border px-1.5 py-0.5 text-[10px] font-medium ${color}`}>{label}</span>
+                                                </button>
+                                              ))}
+                                            {Object.keys(PRESET_TAGS).every((key) => parseTags(p.tags).includes(key)) && (
+                                              <p className="px-3 py-1.5 text-[10px] text-gray-400">所有标签已添加</p>
+                                            )}
+                                          </div>
+                                        )}
+                                      </div>
                                     </div>
                                   </div>
+                                  {/* Enrich button */}
+                                  {enrichingIds.has(p.id) ? (
+                                    <div className="absolute top-2 right-9 rounded-md p-1">
+                                      <Loader2 className="h-3.5 w-3.5 animate-spin text-indigo-400" />
+                                    </div>
+                                  ) : (
+                                    <button
+                                      onClick={(e) => handleEnrich(e, p.id)}
+                                      title="搜索补全信息"
+                                      className="absolute top-2 right-9 rounded-md p-1 text-gray-300 opacity-0 group-hover:opacity-100 hover:text-indigo-500 hover:bg-indigo-50 transition-all"
+                                    >
+                                      <RefreshCw className="h-3.5 w-3.5" />
+                                    </button>
+                                  )}
                                   {/* Delete button */}
                                   <button
                                     onClick={(e) => handleDelete(e, p.id)}
@@ -354,6 +509,16 @@ export default function Professors({
       <ProfessorDetail
         professor={selectedProf}
         onClose={() => { setSelectedProf(null); fetchData() }}
+        onUpdate={() => {
+          fetchData()
+          // Refresh selectedProf with latest data
+          if (selectedProf) {
+            getProfessors().then((res) => {
+              const updated = res.data.find((p: any) => p.id === selectedProf.id)
+              if (updated) setSelectedProf(updated)
+            })
+          }
+        }}
         wsMessages={wsMessages}
       />
     </div>

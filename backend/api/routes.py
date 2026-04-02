@@ -17,7 +17,7 @@ from backend.core import database as db
 from backend.core.models import (
     ProfessorCreate, DraftUpdate, SearchRequest,
 )
-from backend.agents.search_agent import search_professors
+from backend.agents.search_agent import search_professors, enrich_professor
 from backend.agents.compose_agent import compose_emails
 from backend.services.send_service import send_email, send_batch
 from backend.services.reply_tracker import check_replies
@@ -43,6 +43,8 @@ async def list_professors():
 @router.post("/professors")
 async def add_professor(prof: ProfessorCreate):
     data = prof.model_dump()
+    if not data.get("email"):
+        data["email"] = f"unknown-{data['name'].lower().replace(' ', '.')}@tbd"
     result = await db.create_professor(data)
     return result
 
@@ -59,6 +61,55 @@ async def get_professor(prof_id: int):
 async def delete_professor(prof_id: int):
     await db.delete_professor(prof_id)
     return {"message": "已删除"}
+
+
+class ProfessorUpdate(BaseModel):
+    name: Optional[str] = None
+    email: Optional[str] = None
+    university: Optional[str] = None
+    department: Optional[str] = None
+    homepage: Optional[str] = None
+    research_summary: Optional[str] = None
+    recent_papers: Optional[str] = None
+    region: Optional[str] = None
+
+
+@router.put("/professors/{prof_id}")
+async def update_professor(prof_id: int, body: ProfessorUpdate):
+    """手动编辑导师信息"""
+    data = {k: v for k, v in body.model_dump().items() if v is not None}
+    if not data:
+        raise HTTPException(status_code=400, detail="没有要更新的字段")
+    await db.update_professor_info(prof_id, data)
+    prof = await db.get_professor(prof_id)
+    return prof
+
+
+@router.put("/professors/{prof_id}/star")
+async def toggle_star(prof_id: int):
+    """切换导师收藏状态"""
+    starred = await db.toggle_star_professor(prof_id)
+    return {"is_starred": starred}
+
+
+class TagsUpdate(BaseModel):
+    tags: list[str]
+
+
+@router.put("/professors/{prof_id}/tags")
+async def update_tags(prof_id: int, body: TagsUpdate):
+    """更新导师标签"""
+    tags = await db.update_professor_tags(prof_id, body.tags)
+    return {"tags": tags}
+
+
+@router.post("/professors/{prof_id}/enrich")
+async def enrich_prof(prof_id: int):
+    """搜索并补全导师信息（邮箱、主页、研究方向、标签等）"""
+    result = await enrich_professor(prof_id)
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("message", "补全失败"))
+    return result
 
 
 # ── 搜索导师 ──────────────────────────────────────────
@@ -124,6 +175,12 @@ async def update_draft(draft_id: int, data: DraftUpdate):
         raise HTTPException(status_code=400, detail="没有要更新的字段")
     await db.update_draft(draft_id, update_data)
     return await db.get_draft(draft_id)
+
+
+@router.delete("/drafts/{draft_id}")
+async def delete_draft(draft_id: int):
+    await db.delete_draft(draft_id)
+    return {"message": "已删除"}
 
 
 class ComposeRequest(BaseModel):

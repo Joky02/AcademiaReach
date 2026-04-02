@@ -1,8 +1,8 @@
 import { useState, useEffect } from 'react'
 import {
-  FileText, Send, Edit3, SkipForward, Loader2, Sparkles, Eye, X,
+  FileText, Send, Edit3, SkipForward, Loader2, Sparkles, Eye, X, Trash2,
 } from 'lucide-react'
-import { getDrafts, updateDraft, sendEmail, startCompose } from '../services/api'
+import { getDrafts, updateDraft, sendEmail, startCompose, deleteDraft } from '../services/api'
 
 export default function Drafts() {
   const [drafts, setDrafts] = useState<any[]>([])
@@ -43,6 +43,12 @@ export default function Drafts() {
 
   const handleSkip = async (id: number) => {
     await updateDraft(id, { status: 'skipped' })
+    fetchData()
+  }
+
+  const handleDelete = async (id: number) => {
+    if (!confirm('确定删除这条草稿吗？')) return
+    await deleteDraft(id)
     fetchData()
   }
 
@@ -185,6 +191,9 @@ export default function Drafts() {
                       </button>
                     </>
                   )}
+                  <button onClick={() => handleDelete(d.id)} className="rounded-lg border p-2 text-gray-400 hover:text-red-600 hover:bg-red-50" title="删除">
+                    <Trash2 className="h-4 w-4" />
+                  </button>
                 </div>
               </div>
             </div>

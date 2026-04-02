@@ -34,7 +34,7 @@ class ReplyStatus(str, enum.Enum):
 
 class ProfessorBase(BaseModel):
     name: str
-    email: str
+    email: Optional[str] = None
     university: str
     department: Optional[str] = None
     homepage: Optional[str] = None

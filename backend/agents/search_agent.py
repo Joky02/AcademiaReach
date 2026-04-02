@@ -68,6 +68,11 @@ EXTRACT_SYSTEM_PROMPT = """你是一个学术信息提取专家。从 Google 搜
 - research_summary: 研究方向摘要（50字以内）
 - recent_papers: 近期代表性论文（最多3篇，用分号分隔）
 - region: 导师当前任职学校所在的国家/地区（如 China, US, UK, Singapore, Hong Kong 等）。注意：以学校所在地为准，而非导师国籍。
+- tags: 导师的头衔/荣誉标签（JSON 数组）。根据搜索结果中提到的信息判断，可选值包括：
+  - 中国头衔："院士", "杰青", "优青", "长江学者", "青千", "博导"
+  - 国际头衔："Fellow", "AP"(助理教授), "Associate Prof"(副教授), "Full Prof"(正教授)
+  - 如果搜索结果中明确提到了这些头衔，就加上对应标签；如果不确定，留空数组 []
+  - 不要猜测，只根据搜索结果中明确出现的信息来判断
 
 规则：
 - 只提取大学教授/研究员，不要学生或公司研究员
@@ -114,6 +119,124 @@ def _parse_json_response(content: str) -> any:
         content = content.split("\n", 1)[1]
         content = content.rsplit("```", 1)[0].strip()
     return json.loads(content)
+
+
+# ── 单个导师信息补全 ──────────────────────────────────
+
+ENRICH_SYSTEM_PROMPT = """你是一个学术信息补全专家。用户给出了一位导师的部分信息（如姓名、学校），
+现在需要你根据 Google 搜索结果补全这位导师的详细信息。
+
+请返回一个 JSON 对象，包含以下字段（只填写你能从搜索结果中确认的信息，不确定的设为 null）：
+- email: 邮箱地址
+- department: 院系
+- homepage: 个人主页 URL
+- research_summary: 研究方向摘要（50字以内）
+- recent_papers: 近期代表性论文（最多3篇，用分号分隔）
+- region: 导师当前任职学校所在的国家/地区（如 China, US, UK, Singapore, Hong Kong 等）
+- tags: 导师的头衔/荣誉标签（JSON 数组）。可选值：
+  - 中国头衔："院士", "杰青", "优青", "长江学者", "青千", "博导"
+  - 国际头衔："Fellow", "AP"(助理教授), "Associate Prof"(副教授), "Full Prof"(正教授)
+  - 不确定就留空数组 []，不要猜测
+
+规则：
+- 不要编造信息，只从搜索结果中提取
+- 如果搜索结果中完全找不到这位导师的信息，返回所有字段为 null 的 JSON
+
+只返回 JSON 对象，不要其他文字。"""
+
+
+async def enrich_professor(prof_id: int) -> dict:
+    """根据导师的已有信息（名字、学校等），搜索并补全详细信息"""
+    from backend.core import database as db_mod
+
+    prof = await db_mod.get_professor(prof_id)
+    if not prof:
+        return {"success": False, "message": "导师不存在"}
+
+    cfg = load_yaml_config()
+    search_cfg = cfg.get("search", {})
+    serper_key = search_cfg.get("serper_api_key", "")
+    if not serper_key or serper_key == "your-serper-api-key":
+        return {"success": False, "message": "请先配置 Serper API Key"}
+
+    llm = get_llm()
+    name = prof["name"]
+    university = prof["university"]
+    department = prof.get("department") or ""
+
+    # 构造搜索查询
+    queries = [
+        f"{name} {university} professor homepage",
+        f"{name} {university} {department} research email",
+    ]
+
+    all_results = []
+    for q in queries:
+        try:
+            results = await search_serper(q, serper_key, num=8)
+            all_results.extend(results)
+        except Exception as e:
+            logger.warning(f"Enrich search failed for '{q}': {e}")
+        await asyncio.sleep(0.3)
+
+    if not all_results:
+        return {"success": False, "message": "未搜索到任何结果"}
+
+    # 去重
+    seen = set()
+    unique = []
+    for r in all_results:
+        link = r.get("link", "")
+        if link and link not in seen:
+            seen.add(link)
+            unique.append(r)
+
+    search_text = "\n\n".join(
+        f"Title: {r.get('title', '')}\nSnippet: {r.get('snippet', '')}\nLink: {r.get('link', '')}"
+        for r in unique[:15]
+    )
+
+    known_info = f"姓名: {name}\n学校: {university}"
+    if department:
+        known_info += f"\n院系: {department}"
+    if prof.get("homepage"):
+        known_info += f"\n主页: {prof['homepage']}"
+
+    try:
+        resp = await llm.ainvoke([
+            SystemMessage(content=ENRICH_SYSTEM_PROMPT),
+            HumanMessage(content=f"已知信息:\n{known_info}\n\n搜索结果:\n{search_text}\n\n请补全这位导师的信息。"),
+        ])
+        enriched = _parse_json_response(resp.content)
+    except Exception as e:
+        logger.error(f"Enrich LLM failed: {e}")
+        return {"success": False, "message": f"LLM 分析失败: {e}"}
+
+    # 构建更新字段 — 只更新原来为空的字段
+    update_data = {}
+    field_map = ["email", "department", "homepage", "research_summary", "recent_papers", "region"]
+    for field in field_map:
+        new_val = enriched.get(field)
+        old_val = prof.get(field)
+        if new_val and (not old_val or old_val.endswith("@tbd")):
+            update_data[field] = new_val
+
+    # tags: 合并已有 + 新发现的
+    new_tags = enriched.get("tags", [])
+    if isinstance(new_tags, list) and new_tags:
+        import json as _json
+        old_tags_raw = prof.get("tags", "[]")
+        try:
+            old_tags = _json.loads(old_tags_raw) if isinstance(old_tags_raw, str) else (old_tags_raw or [])
+        except Exception:
+            old_tags = []
+        merged = list(dict.fromkeys(old_tags + new_tags))  # 去重保序
+        update_data["tags"] = json.dumps(merged, ensure_ascii=False)
+
+    if update_data:
+        await db_mod.update_professor_info(prof_id, update_data)
+
+    return {"success": True, "updated_fields": list(update_data.keys())}
 
 
 # ── 主流程 ────────────────────────────────────────────
@@ -257,6 +380,10 @@ async def search_professors(
             if not prof_data.get("email"):
                 prof_data["email"] = f"unknown-{prof_data['name'].lower().replace(' ', '.')}@tbd"
             prof_data["source"] = "auto"
+            # 将 tags 序列化为 JSON 字符串
+            raw_tags = prof_data.pop("tags", None)
+            if isinstance(raw_tags, list):
+                prof_data["tags"] = json.dumps(raw_tags, ensure_ascii=False)
             try:
                 saved = await db.create_professor(prof_data)
                 round_saved += 1

@@ -127,6 +127,7 @@ npm install        # Requires Node.js >= 18
 
 ```bash
 cp backend/config/config.yaml.example backend/config/config.yaml
+cp backend/config/my_profile.example.md backend/config/my_profile.md
 ```
 
 Edit `backend/config/config.yaml` and fill in:
