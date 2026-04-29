@@ -1,14 +1,17 @@
 import { useState, useEffect, useRef } from 'react'
 import {
   Save, Loader2, CheckCircle2, Upload, X, Plus, FileText,
-  Mail, Shield, AlertCircle, Eye, EyeOff, Sparkles,
+  Mail, Shield, AlertCircle, Eye, EyeOff, Sparkles, Cpu, Code,
 } from 'lucide-react'
 import {
-  getProfile, updateProfile, getSettings,
+  getProfile, updateProfile, getSettings, updateLlmConfig,
   getCvStatus, uploadCv, updateKeywords,
   getEmailConfig, verifyEmail,
   getPrompts, updatePrompts,
+  getPromptTemplates, updatePromptTemplate,
 } from '../services/api'
+
+type LlmProvider = 'openai' | 'deepseek' | 'ollama'
 
 export default function SettingsPage() {
   const [profile, setProfile] = useState('')
@@ -44,6 +47,25 @@ export default function SettingsPage() {
   const [savingPrompt, setSavingPrompt] = useState(false)
   const [savedPrompt, setSavedPrompt] = useState(false)
 
+  // LLM 后端配置
+  const [llmProvider, setLlmProvider] = useState<LlmProvider>('openai')
+  const [llmForm, setLlmForm] = useState({
+    openai: { model: '', base_url: '', api_key: '', api_key_set: false },
+    deepseek: { model: '', base_url: '', api_key: '', api_key_set: false },
+    ollama: { model: '', base_url: '' },
+  })
+  const [showLlmKey, setShowLlmKey] = useState(false)
+  const [savingLlm, setSavingLlm] = useState(false)
+  const [savedLlm, setSavedLlm] = useState(false)
+
+  // Prompt 模板编辑（backend/prompts/*.md）
+  type PromptTpl = { name: string; description: string; content: string }
+  const [promptTpls, setPromptTpls] = useState<PromptTpl[]>([])
+  const [activeTpl, setActiveTpl] = useState<string>('')
+  const [tplDraft, setTplDraft] = useState<string>('')
+  const [savingTpl, setSavingTpl] = useState(false)
+  const [savedTpl, setSavedTpl] = useState(false)
+
   // 邮箱验证
   const [emailForm, setEmailForm] = useState({
     smtp_host: '', smtp_port: 587, smtp_username: '', smtp_password: '', smtp_use_tls: true,
@@ -55,12 +77,32 @@ export default function SettingsPage() {
   const [verifyResult, setVerifyResult] = useState<any>(null)
 
   const fetchAll = () => {
-    Promise.all([getProfile(), getSettings(), getCvStatus(), getEmailConfig(), getPrompts()])
-      .then(([profRes, setRes, cvRes, emailRes, promptRes]) => {
+    Promise.all([getProfile(), getSettings(), getCvStatus(), getEmailConfig(), getPrompts(), getPromptTemplates()])
+      .then(([profRes, setRes, cvRes, emailRes, promptRes, tplRes]) => {
         setProfile(profRes.data.content)
         setSettings(setRes.data)
         setKeywords(setRes.data.search?.keywords || [])
         setRegions(setRes.data.search?.regions || [])
+        const llm = setRes.data.llm || {}
+        setLlmProvider((llm.provider as LlmProvider) || 'openai')
+        setLlmForm({
+          openai: {
+            model: llm.openai?.model || '',
+            base_url: llm.openai?.base_url || 'https://api.openai.com/v1',
+            api_key: '',
+            api_key_set: !!llm.openai?.api_key_set,
+          },
+          deepseek: {
+            model: llm.deepseek?.model || 'deepseek-chat',
+            base_url: llm.deepseek?.base_url || 'https://api.deepseek.com/v1',
+            api_key: '',
+            api_key_set: !!llm.deepseek?.api_key_set,
+          },
+          ollama: {
+            model: llm.ollama?.model || 'llama3',
+            base_url: llm.ollama?.base_url || 'http://localhost:11434',
+          },
+        })
         setCvStatus(cvRes.data)
         const s = emailRes.data.smtp
         const im = emailRes.data.imap
@@ -70,6 +112,12 @@ export default function SettingsPage() {
           imap_host: im.host, imap_port: im.port, imap_username: im.username, imap_use_ssl: im.use_ssl,
         }))
         setPromptForm(promptRes.data)
+        const tpls = (tplRes.data || []) as PromptTpl[]
+        setPromptTpls(tpls)
+        if (tpls.length > 0) {
+          setActiveTpl(tpls[0].name)
+          setTplDraft(tpls[0].content)
+        }
       })
       .finally(() => setLoading(false))
   }
@@ -113,6 +161,61 @@ export default function SettingsPage() {
       setTimeout(() => setSavedKw(false), 2000)
     } finally {
       setSavingKw(false)
+    }
+  }
+
+  // ── Prompt 模板编辑 ──
+  const handleSwitchTpl = (name: string) => {
+    setActiveTpl(name)
+    const tpl = promptTpls.find((t) => t.name === name)
+    setTplDraft(tpl?.content || '')
+    setSavedTpl(false)
+  }
+
+  const handleSaveTpl = async () => {
+    if (!activeTpl) return
+    setSavingTpl(true)
+    try {
+      await updatePromptTemplate(activeTpl, tplDraft)
+      setPromptTpls(promptTpls.map((t) => (t.name === activeTpl ? { ...t, content: tplDraft } : t)))
+      setSavedTpl(true)
+      setTimeout(() => setSavedTpl(false), 2000)
+    } finally {
+      setSavingTpl(false)
+    }
+  }
+
+  const activeTplMeta = promptTpls.find((t) => t.name === activeTpl)
+
+  // ── LLM 后端配置保存 ──
+  const handleSaveLlm = async () => {
+    setSavingLlm(true)
+    try {
+      const payload: any = { provider: llmProvider }
+      if (llmProvider === 'ollama') {
+        payload.ollama = { model: llmForm.ollama.model, base_url: llmForm.ollama.base_url }
+      } else {
+        const sub = llmForm[llmProvider]
+        payload[llmProvider] = {
+          model: sub.model,
+          base_url: sub.base_url,
+          api_key: sub.api_key,  // 空字符串后端会保留旧值
+        }
+      }
+      await updateLlmConfig(payload)
+      setSavedLlm(true)
+      // 刷新顶部状态卡片 & 清空 api_key 输入框、标记已配置
+      const res = await getSettings()
+      setSettings(res.data)
+      const llm = res.data.llm || {}
+      setLlmForm((prev) => ({
+        ...prev,
+        openai: { ...prev.openai, api_key: '', api_key_set: !!llm.openai?.api_key_set },
+        deepseek: { ...prev.deepseek, api_key: '', api_key_set: !!llm.deepseek?.api_key_set },
+      }))
+      setTimeout(() => setSavedLlm(false), 2000)
+    } finally {
+      setSavingLlm(false)
     }
   }
 
@@ -195,10 +298,119 @@ export default function SettingsPage() {
             </div>
           </div>
           <p className="mt-4 text-sm text-gray-400">
-            LLM、SMTP、IMAP 配置请编辑 <code className="rounded bg-gray-100 px-1 py-0.5">backend/config/config.yaml</code>（该文件已被 .gitignore 排除）
+            SMTP / IMAP 也可在下方配置。LLM 后端见下方「LLM 后端配置」卡片，其余字段请编辑 <code className="rounded bg-gray-100 px-1 py-0.5">backend/config/config.yaml</code>。
           </p>
         </div>
       )}
+
+      {/* LLM 后端配置 */}
+      <div className="rounded-xl bg-white p-6 shadow-sm border border-gray-100">
+        <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center gap-2">
+            <Cpu className="h-5 w-5 text-indigo-500" />
+            <h3 className="text-lg font-semibold text-gray-800">LLM 后端配置</h3>
+          </div>
+          <button
+            onClick={handleSaveLlm}
+            disabled={savingLlm}
+            className="inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
+          >
+            {savingLlm ? <Loader2 className="h-4 w-4 animate-spin" /> : savedLlm ? <CheckCircle2 className="h-4 w-4" /> : <Save className="h-4 w-4" />}
+            {savingLlm ? '保存中...' : savedLlm ? '已保存' : '保存'}
+          </button>
+        </div>
+
+        <div className="mb-5">
+          <label className="block text-sm font-medium text-gray-700 mb-1.5">Provider</label>
+          <p className="text-xs text-gray-400 mb-2">切换搜索 / 邮件生成 Agent 使用的 LLM 后端</p>
+          <div className="flex gap-2">
+            {(['openai', 'deepseek', 'ollama'] as LlmProvider[]).map((p) => (
+              <button
+                key={p}
+                onClick={() => setLlmProvider(p)}
+                className={`rounded-lg border px-4 py-2 text-sm font-medium transition-colors ${
+                  llmProvider === p
+                    ? 'border-indigo-500 bg-indigo-50 text-indigo-700'
+                    : 'border-gray-200 text-gray-600 hover:bg-gray-50'
+                }`}
+              >
+                {p === 'openai' ? 'OpenAI 兼容' : p === 'deepseek' ? 'DeepSeek' : 'Ollama (本地)'}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {llmProvider !== 'ollama' && (
+          <div className="space-y-3">
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">Model</label>
+              <input
+                value={llmForm[llmProvider].model}
+                onChange={(e) => setLlmForm({
+                  ...llmForm,
+                  [llmProvider]: { ...llmForm[llmProvider], model: e.target.value },
+                })}
+                placeholder={llmProvider === 'deepseek' ? 'deepseek-chat / deepseek-reasoner' : 'gpt-4o'}
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+              />
+            </div>
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">Base URL</label>
+              <input
+                value={llmForm[llmProvider].base_url}
+                onChange={(e) => setLlmForm({
+                  ...llmForm,
+                  [llmProvider]: { ...llmForm[llmProvider], base_url: e.target.value },
+                })}
+                placeholder={llmProvider === 'deepseek' ? 'https://api.deepseek.com/v1' : 'https://api.openai.com/v1'}
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+              />
+            </div>
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">API Key</label>
+              <div className="relative">
+                <input
+                  type={showLlmKey ? 'text' : 'password'}
+                  value={llmForm[llmProvider].api_key}
+                  onChange={(e) => setLlmForm({
+                    ...llmForm,
+                    [llmProvider]: { ...llmForm[llmProvider], api_key: e.target.value },
+                  })}
+                  placeholder={llmForm[llmProvider].api_key_set ? '已配置（留空则保留原 Key）' : 'sk-...'}
+                  className="w-full rounded-lg border border-gray-300 px-3 py-2 pr-10 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+                />
+                <button onClick={() => setShowLlmKey(!showLlmKey)} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
+                  {showLlmKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {llmProvider === 'ollama' && (
+          <div className="space-y-3">
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">Model</label>
+              <input
+                value={llmForm.ollama.model}
+                onChange={(e) => setLlmForm({ ...llmForm, ollama: { ...llmForm.ollama, model: e.target.value } })}
+                placeholder="llama3 / qwen2.5 / ..."
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+              />
+            </div>
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">Base URL</label>
+              <input
+                value={llmForm.ollama.base_url}
+                onChange={(e) => setLlmForm({ ...llmForm, ollama: { ...llmForm.ollama, base_url: e.target.value } })}
+                placeholder="http://localhost:11434"
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+              />
+            </div>
+            <p className="text-xs text-gray-400">Ollama 本地模型不需要 API Key</p>
+          </div>
+        )}
+      </div>
 
       {/* 邮箱验证 */}
       <div className="rounded-xl bg-white p-6 shadow-sm border border-gray-100">
@@ -486,6 +698,61 @@ export default function SettingsPage() {
             />
           </div>
         </div>
+      </div>
+
+      {/* Prompt 模板编辑器 — 直接编辑 backend/prompts/*.md */}
+      <div className="rounded-xl bg-white p-6 shadow-sm border border-gray-100">
+        <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center gap-2">
+            <Code className="h-5 w-5 text-indigo-500" />
+            <h3 className="text-lg font-semibold text-gray-800">Prompt 模板</h3>
+          </div>
+          <button
+            onClick={handleSaveTpl}
+            disabled={savingTpl || !activeTpl}
+            className="inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
+          >
+            {savingTpl ? <Loader2 className="h-4 w-4 animate-spin" /> : savedTpl ? <CheckCircle2 className="h-4 w-4" /> : <Save className="h-4 w-4" />}
+            {savingTpl ? '保存中...' : savedTpl ? '已保存' : '保存'}
+          </button>
+        </div>
+        <p className="text-sm text-gray-500 mb-4">
+          直接编辑 <code className="rounded bg-gray-100 px-1 py-0.5">backend/prompts/*.md</code> 中的 system prompt。修改后立即生效（每次调用都从磁盘读取，无需重启服务）。
+        </p>
+
+        <div className="flex flex-wrap gap-2 mb-3">
+          {promptTpls.map((t) => (
+            <button
+              key={t.name}
+              onClick={() => handleSwitchTpl(t.name)}
+              className={`rounded-lg border px-3 py-1.5 text-sm font-medium transition-colors ${
+                activeTpl === t.name
+                  ? 'border-indigo-500 bg-indigo-50 text-indigo-700'
+                  : 'border-gray-200 text-gray-600 hover:bg-gray-50'
+              }`}
+            >
+              {t.name}
+            </button>
+          ))}
+        </div>
+
+        {activeTplMeta && (
+          <p className="text-xs text-gray-400 mb-2">{activeTplMeta.description}</p>
+        )}
+
+        <textarea
+          value={tplDraft}
+          onChange={(e) => setTplDraft(e.target.value)}
+          rows={20}
+          className="w-full rounded-lg border border-gray-300 px-3 py-2 font-mono text-xs focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+          placeholder="选择上方模板进行编辑..."
+        />
+
+        {activeTpl === 'search_system' && (
+          <p className="mt-2 text-xs text-amber-600">
+            ⚠️ 此模板含 <code className="rounded bg-amber-50 px-1">{'{extra}'}</code> 占位符（运行时替换为关键词/地区/搜索偏好）。删除占位符会导致这些用户配置无法注入。
+          </p>
+        )}
       </div>
 
       {/* 简历上传 */}

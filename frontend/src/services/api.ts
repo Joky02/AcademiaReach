@@ -44,6 +44,7 @@ export const getProfile = () => api.get('/config/profile')
 export const updateProfile = (content: string) =>
   api.put('/config/profile', { content })
 export const getSettings = () => api.get('/config/settings')
+export const updateLlmConfig = (data: any) => api.put('/config/llm', data)
 
 // ── CV 简历管理 ──────────────────────────────────────
 export const getCvStatus = () => api.get('/config/cv')
@@ -66,6 +67,11 @@ export const verifyEmail = (data: any) => api.post('/config/email/verify', data)
 // ── 自定义 Prompt ───────────────────────────────────
 export const getPrompts = () => api.get('/config/prompts')
 export const updatePrompts = (data: any) => api.put('/config/prompts', data)
+
+// ── Prompt 模板（backend/prompts/*.md）────────────────
+export const getPromptTemplates = () => api.get('/config/prompt-templates')
+export const updatePromptTemplate = (name: string, content: string) =>
+  api.put(`/config/prompt-templates/${name}`, { content })
 
 // ── WebSocket ────────────────────────────────────────
 export function connectWebSocket(onMessage: (data: any) => void): WebSocket {

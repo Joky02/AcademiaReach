@@ -265,8 +265,24 @@ async def get_settings():
     from backend.core.llm import load_yaml_config
     cfg = load_yaml_config()
     # 隐藏敏感信息
+    llm_cfg = cfg.get("llm", {})
+    def _llm_sub(name: str, default_base: str = "") -> dict:
+        sub = llm_cfg.get(name, {}) or {}
+        return {
+            "model": sub.get("model", ""),
+            "base_url": sub.get("base_url", default_base),
+            "api_key_set": bool(sub.get("api_key", "")),
+        }
     safe_cfg = {
-        "llm": {"provider": cfg.get("llm", {}).get("provider", "openai")},
+        "llm": {
+            "provider": llm_cfg.get("provider", "openai"),
+            "openai": _llm_sub("openai", "https://api.openai.com/v1"),
+            "deepseek": _llm_sub("deepseek", "https://api.deepseek.com/v1"),
+            "ollama": {
+                "model": (llm_cfg.get("ollama", {}) or {}).get("model", ""),
+                "base_url": (llm_cfg.get("ollama", {}) or {}).get("base_url", "http://localhost:11434"),
+            },
+        },
         "search": {
             "keywords": cfg.get("search", {}).get("keywords", []),
             "regions": cfg.get("search", {}).get("regions", []),
@@ -285,6 +301,85 @@ async def get_settings():
         },
     }
     return safe_cfg
+
+
+# ── Prompt 模板编辑（backend/prompts/*.md）──────────
+
+
+@router.get("/config/prompt-templates")
+async def list_prompt_templates():
+    """列出所有 prompt 模板（含描述和当前内容）"""
+    from backend.core.prompts import list_prompts, load_prompt
+    items = []
+    for p in list_prompts():
+        try:
+            content = load_prompt(p["name"])
+        except FileNotFoundError:
+            content = ""
+        items.append({**p, "content": content})
+    return items
+
+
+class PromptTemplateUpdate(BaseModel):
+    content: str
+
+
+@router.put("/config/prompt-templates/{name}")
+async def update_prompt_template(name: str, body: PromptTemplateUpdate):
+    """覆盖写入指定 prompt 模板"""
+    from backend.core.prompts import save_prompt
+    try:
+        save_prompt(name, body.content)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"未知模板: {name}")
+    return {"message": f"模板 {name} 已更新"}
+
+
+# ── LLM 后端配置 ──────────────────────────────────
+
+
+class LlmProviderSub(BaseModel):
+    model: Optional[str] = None
+    base_url: Optional[str] = None
+    api_key: Optional[str] = None  # 空字符串表示"不修改"，避免前端没回显时误清空
+
+
+class LlmConfigUpdate(BaseModel):
+    provider: str
+    openai: Optional[LlmProviderSub] = None
+    deepseek: Optional[LlmProviderSub] = None
+    ollama: Optional[LlmProviderSub] = None
+
+
+@router.put("/config/llm")
+async def update_llm_config(data: LlmConfigUpdate):
+    """切换 LLM provider 并更新对应 provider 的 model/base_url/api_key"""
+    if data.provider not in ("openai", "deepseek", "ollama"):
+        raise HTTPException(status_code=400, detail="provider 必须是 openai/deepseek/ollama")
+
+    from backend.core.llm import CONFIG_PATH, load_yaml_config
+    cfg = load_yaml_config()
+    if "llm" not in cfg:
+        cfg["llm"] = {}
+    cfg["llm"]["provider"] = data.provider
+
+    for name in ("openai", "deepseek", "ollama"):
+        sub: Optional[LlmProviderSub] = getattr(data, name)
+        if sub is None:
+            continue
+        existing = cfg["llm"].get(name, {}) or {}
+        if sub.model is not None:
+            existing["model"] = sub.model
+        if sub.base_url is not None:
+            existing["base_url"] = sub.base_url
+        # api_key: 空字符串视为不修改（避免前端表单提交时清空已保存的 key）
+        if sub.api_key:
+            existing["api_key"] = sub.api_key
+        cfg["llm"][name] = existing
+
+    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+        yaml.dump(cfg, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
+    return {"message": "LLM 配置已更新", "provider": data.provider}
 
 
 # ── 简历管理 ──────────────────────────────────────
