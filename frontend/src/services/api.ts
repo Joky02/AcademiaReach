@@ -11,7 +11,12 @@ export const getStats = () => api.get('/stats')
 // ── Professors ───────────────────────────────────────
 export const getProfessors = () => api.get('/professors')
 export const addProfessor = (data: any) => api.post('/professors', data)
-export const deleteProfessor = (id: number) => api.delete(`/professors/${id}`)
+export const deleteProfessor = (id: number, blacklist = true) =>
+  api.delete(`/professors/${id}`, { params: { blacklist } })
+
+// ── 黑名单 ──────────────────────────────────────────
+export const getBlacklist = () => api.get('/blacklist')
+export const removeFromBlacklist = (id: number) => api.delete(`/blacklist/${id}`)
 export const updateProfessor = (id: number, data: any) => api.put(`/professors/${id}`, data)
 export const toggleStar = (id: number) => api.put(`/professors/${id}/star`)
 export const updateProfTags = (id: number, tags: string[]) =>
@@ -43,10 +48,12 @@ export const markReplyRead = (id: number) => api.put(`/replies/${id}/read`)
 export const getProfile = () => api.get('/config/profile')
 export const updateProfile = (content: string) =>
   api.put('/config/profile', { content })
+export const generateProfile = (pitch?: string) =>
+  api.post('/config/profile/generate', { pitch })
 export const getSettings = () => api.get('/config/settings')
 export const updateLlmConfig = (data: any) => api.put('/config/llm', data)
 
-// ── CV 简历管理 ──────────────────────────────────────
+// ── CV / 成绩单 / 论文 附件管理 ──────────────────────
 export const getCvStatus = () => api.get('/config/cv')
 export const uploadCv = (lang: 'cn' | 'en', file: File) => {
   const form = new FormData()
@@ -55,6 +62,22 @@ export const uploadCv = (lang: 'cn' | 'en', file: File) => {
     headers: { 'Content-Type': 'multipart/form-data' },
   })
 }
+export const uploadTranscript = (lang: 'cn' | 'en', file: File) => {
+  const form = new FormData()
+  form.append('file', file)
+  return api.post(`/config/transcript/${lang}`, form, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  })
+}
+export const uploadPaper = (file: File) => {
+  const form = new FormData()
+  form.append('file', file)
+  return api.post('/config/papers', form, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  })
+}
+export const deletePaper = (name: string) =>
+  api.delete(`/config/papers/${encodeURIComponent(name)}`)
 
 // ── 搜索关键词 ──────────────────────────────────────
 export const updateKeywords = (keywords: string[], regions?: string[]) =>

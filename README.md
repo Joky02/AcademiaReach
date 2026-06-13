@@ -128,6 +128,9 @@ npm install        # Requires Node.js >= 18
 ```bash
 cp backend/config/config.yaml.example backend/config/config.yaml
 cp backend/config/my_profile.example.md backend/config/my_profile.md
+# Optional: create private local prompt overrides ignored by Git
+mkdir -p backend/config/prompts
+cp backend/prompts/compose_cn.md backend/config/prompts/compose_cn.md
 ```
 
 Edit `backend/config/config.yaml` and fill in:
@@ -137,6 +140,8 @@ Edit `backend/config/config.yaml` and fill in:
 - **IMAP credentials** — Incoming email, used for reply tracking
 
 Edit `backend/config/my_profile.md` with your research background, publications, skills, etc. in Markdown.
+
+`backend/prompts/*.md` contains commit-safe example prompts. If you want to add a fixed email subject or personal details such as your real name, institution, awards, or publication status, edit only the local override files under `backend/config/prompts/*.md`. That directory is ignored by Git, and the backend loads local overrides before the example prompts.
 
 ### 5. Launch
 

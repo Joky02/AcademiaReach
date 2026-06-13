@@ -126,6 +126,9 @@ npm install        # 需要 Node.js >= 18
 ```bash
 cp backend/config/config.yaml.example backend/config/config.yaml
 cp backend/config/my_profile.example.md backend/config/my_profile.md
+# 可选：如果要写自己的私有邮件 prompt，复制到被 git 忽略的本地覆盖目录
+mkdir -p backend/config/prompts
+cp backend/prompts/compose_cn.md backend/config/prompts/compose_cn.md
 ```
 
 编辑 `backend/config/config.yaml`，填入：
@@ -135,6 +138,8 @@ cp backend/config/my_profile.example.md backend/config/my_profile.md
 - **IMAP 凭据** — 收件邮箱，用于回复跟踪
 
 编辑 `backend/config/my_profile.md`，用 Markdown 填写你的研究背景、发表论文、技能等。
+
+`backend/prompts/*.md` 是可提交的通用 example prompt。若你需要固定邮件标题、写入真实姓名 / 学校 / 奖项 / 论文身份等个人信息，请只编辑 `backend/config/prompts/*.md` 中的本地覆盖文件；该目录已被 `.gitignore` 忽略，后端会优先读取本地覆盖文件。
 
 ### 5. 启动
 

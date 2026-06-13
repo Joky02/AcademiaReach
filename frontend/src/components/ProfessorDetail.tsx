@@ -5,6 +5,7 @@ import {
   Pencil, Save, RefreshCw,
 } from 'lucide-react'
 import { getDrafts, startCompose, sendEmail, updateProfessor, enrichProfessor, deleteDraft } from '../services/api'
+import { nameToGradient, getInitials } from '../utils/avatar'
 
 interface Professor {
   id: number
@@ -13,6 +14,7 @@ interface Professor {
   university: string
   department?: string
   homepage?: string
+  google_scholar?: string
   research_summary?: string
   recent_papers?: string
   region?: string
@@ -75,6 +77,7 @@ export default function ProfessorDetail({ professor, onClose, onUpdate, wsMessag
       university: professor.university || '',
       department: professor.department || '',
       homepage: professor.homepage || '',
+      google_scholar: professor.google_scholar || '',
       research_summary: professor.research_summary || '',
       recent_papers: professor.recent_papers || '',
       region: professor.region || '',
@@ -111,12 +114,8 @@ export default function ProfessorDetail({ professor, onClose, onUpdate, wsMessag
 
   if (!professor) return null
 
-  const initials = professor.name
-    .split(' ')
-    .map((n) => n[0])
-    .join('')
-    .slice(0, 2)
-    .toUpperCase()
+  const initials = getInitials(professor.name)
+  const gradient = nameToGradient(professor.name)
 
   const hasSent = drafts.some((d) => d.status === 'sent')
   const hasPending = drafts.some((d) => d.status === 'pending')
@@ -127,6 +126,7 @@ export default function ProfessorDetail({ professor, onClose, onUpdate, wsMessag
     { key: 'university', label: '学校' },
     { key: 'department', label: '院系' },
     { key: 'homepage', label: '主页' },
+    { key: 'google_scholar', label: 'Google Scholar' },
     { key: 'region', label: '地区' },
     { key: 'research_summary', label: '研究方向' },
     { key: 'recent_papers', label: '近期论文' },
@@ -199,7 +199,7 @@ export default function ProfessorDetail({ professor, onClose, onUpdate, wsMessag
         </button>
 
         {/* Header card */}
-        <div className="bg-gradient-to-br from-indigo-500 to-purple-600 px-6 py-8 text-white">
+        <div className={`bg-gradient-to-br ${gradient} px-6 py-8 text-white`}>
           <div className="flex items-start gap-5">
             {/* Avatar */}
             <div className="flex h-20 w-20 shrink-0 items-center justify-center rounded-2xl bg-white/20 text-2xl font-bold backdrop-blur-sm">
@@ -335,6 +335,19 @@ export default function ProfessorDetail({ professor, onClose, onUpdate, wsMessag
                         className="text-sm text-indigo-600 hover:underline inline-flex items-center gap-1 truncate"
                       >
                         访问主页 <ExternalLink className="h-3 w-3 shrink-0" />
+                      </a>
+                    </div>
+                  )}
+                  {professor.google_scholar && (
+                    <div className="rounded-lg border border-gray-100 p-3">
+                      <p className="text-xs text-gray-500 mb-1">Google Scholar</p>
+                      <a
+                        href={professor.google_scholar}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-sm text-indigo-600 hover:underline inline-flex items-center gap-1 truncate"
+                      >
+                        查看 Scholar 主页 <ExternalLink className="h-3 w-3 shrink-0" />
                       </a>
                     </div>
                   )}

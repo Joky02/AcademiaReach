@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { Routes, Route, NavLink } from 'react-router-dom'
 import {
   LayoutDashboard, Search, FileText, Send, MessageSquareReply, Settings,
-  GraduationCap, Menu, X,
+  GraduationCap, Menu,
 } from 'lucide-react'
 import Dashboard from './pages/Dashboard'
 import Professors from './pages/Professors'
@@ -62,6 +62,11 @@ export default function App() {
     if (latest.channel === 'compose') {
       if (latest.type === 'progress' || latest.type === 'error') {
         setComposeLog((prev) => [...prev, latest.message])
+      }
+      // 收到任何进行中的消息就标记"撰写中"，覆盖直接调 startCompose() 但漏掉
+      // 全局状态更新的入口（比如 ProfessorDetail 单条触发的场景）
+      if (latest.type === 'progress' || latest.type === 'draft') {
+        setComposing(true)
       }
       if (latest.type === 'done' || latest.type === 'error') {
         setComposing(false)

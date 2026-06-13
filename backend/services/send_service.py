@@ -16,6 +16,7 @@ from backend.core import database as db
 
 
 CV_DIR = Path(__file__).parent.parent / "config"
+PAPERS_DIR = CV_DIR / "papers"
 
 
 def _get_smtp_config() -> dict:
@@ -28,6 +29,28 @@ def _get_cv_path(language: str) -> Optional[Path]:
     filename = "cv_cn.pdf" if language == "cn" else "cv_en.pdf"
     path = CV_DIR / filename
     return path if path.exists() else None
+
+
+def _get_transcript_path(language: str) -> Optional[Path]:
+    """根据语言返回对应的成绩单文件路径"""
+    filename = "transcript_cn.pdf" if language == "cn" else "transcript_en.pdf"
+    path = CV_DIR / filename
+    return path if path.exists() else None
+
+
+def _get_papers() -> list[Path]:
+    """返回 papers/ 目录下所有 PDF（按文件名排序）"""
+    if not PAPERS_DIR.exists():
+        return []
+    return sorted(p for p in PAPERS_DIR.iterdir() if p.is_file() and p.suffix.lower() == ".pdf")
+
+
+def _attach_pdf(msg: MIMEMultipart, path: Path) -> None:
+    """把一个 PDF 文件挂到 mime message 上"""
+    with open(path, "rb") as f:
+        part = MIMEApplication(f.read(), _subtype="pdf")
+        part.add_header("Content-Disposition", "attachment", filename=path.name)
+        msg.attach(part)
 
 
 async def send_email(draft_id: int) -> dict:
@@ -58,17 +81,16 @@ async def send_email(draft_id: int) -> dict:
     msg["To"] = to_email
     msg.attach(MIMEText(draft["body"], "plain", "utf-8"))
 
-    # 附加简历
+    # 附件：简历 + 成绩单（按导师所在地区选中/英）+ 论文（papers/ 全部）
     lang = draft.get("language", "en")
     cv_path = _get_cv_path(lang)
     if cv_path:
-        with open(cv_path, "rb") as f:
-            cv_attach = MIMEApplication(f.read(), _subtype="pdf")
-            cv_attach.add_header(
-                "Content-Disposition", "attachment",
-                filename=cv_path.name,
-            )
-            msg.attach(cv_attach)
+        _attach_pdf(msg, cv_path)
+    transcript_path = _get_transcript_path(lang)
+    if transcript_path:
+        _attach_pdf(msg, transcript_path)
+    for paper_path in _get_papers():
+        _attach_pdf(msg, paper_path)
 
     try:
         if smtp_cfg.get("use_tls", True):

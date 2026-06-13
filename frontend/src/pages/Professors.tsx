@@ -2,13 +2,14 @@ import { useState, useEffect, useMemo } from 'react'
 import {
   Search, Trash2, ExternalLink, Loader2, UserPlus, Globe,
   MapPin, Building2, Mail, FileText, Send, ChevronDown, ChevronRight, Bot,
-  Star, Tag, Plus, X, RefreshCw,
+  Star, Tag, Plus, X, RefreshCw, GraduationCap, Filter,
 } from 'lucide-react'
 import {
   getProfessors, addProfessor, deleteProfessor, getDrafts,
   toggleStar, updateProfTags, enrichProfessor,
 } from '../services/api'
 import ProfessorDetail from '../components/ProfessorDetail'
+import { nameToGradient, getInitials } from '../utils/avatar'
 
 interface Props {
   wsMessages: any[]
@@ -23,7 +24,7 @@ interface Props {
 // 地区显示名 & 排序权重
 const REGION_LABELS: Record<string, string> = {
   China: '中国大陆', 'Hong Kong': '中国香港', Singapore: '新加坡',
-  US: '美国', UK: '英国', CA: '加拿大', AU: '澳大利亚',
+  US: '美国', UK: '英国', CA: '加拿大', AU: '澳大利亚', Other: '未标地区',
 }
 const REGION_ORDER = ['China', 'Hong Kong', 'Singapore', 'US', 'UK', 'CA', 'AU']
 
@@ -40,6 +41,45 @@ const PRESET_TAGS: Record<string, { label: string; color: string }> = {
   'Full Prof': { label: 'Full Prof', color: 'bg-indigo-100 text-indigo-700 border-indigo-200' },
   '博导': { label: '博导', color: 'bg-purple-100 text-purple-700 border-purple-200' },
 }
+
+const normalizeRegion = (raw: any) => {
+  const value = String(raw || '').trim()
+  if (!value) return 'Other'
+  const lower = value.toLowerCase()
+  if (['china', 'cn', 'mainland china', '中国', '中国大陆', '大陆'].includes(lower)) return 'China'
+  if (['hong kong', 'hongkong', 'hk', '中国香港', '香港'].includes(lower)) return 'Hong Kong'
+  if (['singapore', 'sg', '新加坡'].includes(lower)) return 'Singapore'
+  if (['us', 'usa', 'united states', 'america', '美国'].includes(lower)) return 'US'
+  if (['uk', 'united kingdom', 'britain', 'england', '英国'].includes(lower)) return 'UK'
+  if (['canada', 'ca', '加拿大'].includes(lower)) return 'CA'
+  if (['australia', 'au', '澳大利亚'].includes(lower)) return 'AU'
+  return value
+}
+
+const regionRank = (region: string) => {
+  const idx = REGION_ORDER.indexOf(region)
+  return idx === -1 ? 999 : idx
+}
+
+const parseTags = (raw: any): string[] => {
+  if (Array.isArray(raw)) return raw
+  if (typeof raw === 'string') {
+    try { return JSON.parse(raw) } catch { return [] }
+  }
+  return []
+}
+
+const regionColors: Record<string, string> = {
+  China: 'from-red-500 to-rose-600',
+  'Hong Kong': 'from-pink-500 to-fuchsia-600',
+  Singapore: 'from-emerald-500 to-teal-600',
+  US: 'from-blue-500 to-indigo-600',
+  UK: 'from-violet-500 to-purple-600',
+  CA: 'from-orange-500 to-amber-600',
+  AU: 'from-cyan-500 to-sky-600',
+}
+
+type StatusFilter = 'all' | 'starred' | 'needs_email' | 'no_draft' | 'draft' | 'sent'
 
 export default function Professors({
   wsMessages, searching, searchLog, onStartSearch, onOpenSearchModal, composing, onStartCompose,
@@ -58,11 +98,14 @@ export default function Professors({
   const [showAdd, setShowAdd] = useState(false)
   const [form, setForm] = useState({
     name: '', email: '', university: '', department: '',
-    homepage: '', research_summary: '', region: '',
+    homepage: '', google_scholar: '', research_summary: '', region: '',
   })
 
   // Collapsed regions
   const [collapsedRegions, setCollapsedRegions] = useState<Set<string>>(new Set())
+  const [activeRegion, setActiveRegion] = useState<string>('all')
+  const [query, setQuery] = useState('')
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
 
   // Tag picker
   const [tagPickerProf, setTagPickerProf] = useState<number | null>(null)
@@ -103,11 +146,69 @@ export default function Professors({
     }
   }, [wsMessages])
 
-  // Group professors by region → university
+  const getEmailStatus = (profId: number) => {
+    const ds = draftsMap[profId]
+    if (!ds || ds.length === 0) return null
+    if (ds.some((d: any) => d.status === 'sent')) return 'sent'
+    return 'draft'
+  }
+
+  const isPlaceholderEmail = (email?: string) => {
+    const value = email || ''
+    return !value || value.includes('@tbd') || value.startsWith('http')
+  }
+
+  const regionSummary = useMemo(() => {
+    const map: Record<string, { count: number; universities: Set<string>; starred: number; pendingEmail: number }> = {}
+    for (const p of professors) {
+      const region = normalizeRegion(p.region)
+      if (!map[region]) map[region] = { count: 0, universities: new Set(), starred: 0, pendingEmail: 0 }
+      map[region].count += 1
+      map[region].universities.add(p.university || 'Unknown')
+      if (p.is_starred) map[region].starred += 1
+      if (isPlaceholderEmail(p.email)) map[region].pendingEmail += 1
+    }
+    return Object.entries(map)
+      .sort(([a], [b]) => regionRank(a) - regionRank(b) || a.localeCompare(b))
+      .map(([region, data]) => ({ region, ...data, universityCount: data.universities.size }))
+  }, [professors])
+
+  const scopedProfessors = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    return professors.filter((p) => {
+      const region = normalizeRegion(p.region)
+      if (activeRegion !== 'all' && region !== activeRegion) return false
+
+      if (!q) return true
+      const haystack = [
+        p.name, p.university, p.department, p.email, p.research_summary, p.recent_papers,
+        REGION_LABELS[region] || region, ...parseTags(p.tags),
+      ].filter(Boolean).join(' ').toLowerCase()
+      return haystack.includes(q)
+    })
+  }, [professors, activeRegion, query])
+
+  const filteredProfessors = useMemo(() => {
+    return scopedProfessors.filter((p) => {
+      const status = getEmailStatus(p.id)
+      if (statusFilter === 'starred') return !!p.is_starred
+      if (statusFilter === 'needs_email') return isPlaceholderEmail(p.email)
+      if (statusFilter === 'no_draft') return !status
+      if (statusFilter === 'draft') return status === 'draft'
+      if (statusFilter === 'sent') return status === 'sent'
+      return true
+    })
+  }, [scopedProfessors, draftsMap, statusFilter])
+
+  const totalPendingEmail = professors.filter((p) => isPlaceholderEmail(p.email)).length
+  const totalStarred = professors.filter((p) => p.is_starred).length
+  const totalWithoutDraft = professors.filter((p) => !getEmailStatus(p.id)).length
+
+  // Group professors by normalized region → university
   const grouped = useMemo(() => {
     const regionMap: Record<string, Record<string, any[]>> = {}
-    for (const p of professors) {
-      const region = p.region || 'Other'
+    for (const p of filteredProfessors) {
+      const region = normalizeRegion(p.region)
       const uni = p.university || 'Unknown'
       if (!regionMap[region]) regionMap[region] = {}
       if (!regionMap[region][uni]) regionMap[region][uni] = []
@@ -115,12 +216,10 @@ export default function Professors({
     }
     // Sort regions
     const sorted = Object.entries(regionMap).sort(([a], [b]) => {
-      const ia = REGION_ORDER.indexOf(a)
-      const ib = REGION_ORDER.indexOf(b)
-      return (ia === -1 ? 999 : ia) - (ib === -1 ? 999 : ib)
+      return regionRank(a) - regionRank(b) || a.localeCompare(b)
     })
     return sorted
-  }, [professors])
+  }, [filteredProfessors])
 
   const handleSearch = () => {
     setNewProfIds(new Set())
@@ -130,7 +229,7 @@ export default function Professors({
   const handleAdd = async () => {
     if (!form.name || !form.university) return
     const res = await addProfessor(form)
-    setForm({ name: '', email: '', university: '', department: '', homepage: '', research_summary: '', region: '' })
+    setForm({ name: '', email: '', university: '', department: '', homepage: '', google_scholar: '', research_summary: '', region: '' })
     setShowAdd(false)
     fetchData()
     // Auto-enrich in background
@@ -146,8 +245,8 @@ export default function Professors({
 
   const handleDelete = async (e: React.MouseEvent, id: number) => {
     e.stopPropagation()
-    if (!confirm('确定删除这位导师吗？')) return
-    await deleteProfessor(id)
+    if (!confirm('删除这位导师，并将其加入黑名单（之后的自动搜索不会再推荐 ta）？')) return
+    await deleteProfessor(id)  // 默认 blacklist=true
     fetchData()
   }
 
@@ -187,14 +286,6 @@ export default function Professors({
     fetchData()
   }
 
-  const parseTags = (raw: any): string[] => {
-    if (Array.isArray(raw)) return raw
-    if (typeof raw === 'string') {
-      try { return JSON.parse(raw) } catch { return [] }
-    }
-    return []
-  }
-
   const toggleRegion = (region: string) => {
     setCollapsedRegions((prev) => {
       const next = new Set(prev)
@@ -203,26 +294,14 @@ export default function Professors({
     })
   }
 
-  const emailStatus = (profId: number) => {
-    const ds = draftsMap[profId]
-    if (!ds || ds.length === 0) return null
-    if (ds.some((d: any) => d.status === 'sent')) return 'sent'
-    return 'draft'
-  }
-
-  const initials = (name: string) =>
-    name.split(' ').map((n) => n[0]).join('').slice(0, 2).toUpperCase()
-
-  // Color palette for region headers
-  const regionColors: Record<string, string> = {
-    China: 'from-red-500 to-rose-600',
-    'Hong Kong': 'from-pink-500 to-fuchsia-600',
-    Singapore: 'from-emerald-500 to-teal-600',
-    US: 'from-blue-500 to-indigo-600',
-    UK: 'from-violet-500 to-purple-600',
-    CA: 'from-orange-500 to-amber-600',
-    AU: 'from-cyan-500 to-sky-600',
-  }
+  const statusFilters: Array<{ key: StatusFilter; label: string; count: number }> = [
+    { key: 'all', label: '全部', count: scopedProfessors.length },
+    { key: 'starred', label: '收藏', count: scopedProfessors.filter((p) => p.is_starred).length },
+    { key: 'needs_email', label: '缺邮箱', count: scopedProfessors.filter((p) => isPlaceholderEmail(p.email)).length },
+    { key: 'no_draft', label: '未生成', count: scopedProfessors.filter((p) => !getEmailStatus(p.id)).length },
+    { key: 'draft', label: '有草稿', count: scopedProfessors.filter((p) => getEmailStatus(p.id) === 'draft').length },
+    { key: 'sent', label: '已发送', count: scopedProfessors.filter((p) => getEmailStatus(p.id) === 'sent').length },
+  ]
 
   return (
     <div className="space-y-6">
@@ -230,7 +309,12 @@ export default function Professors({
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
           <h2 className="text-2xl font-bold text-gray-900">导师管理</h2>
-          <p className="text-sm text-gray-500 mt-0.5">共 {professors.length} 位导师</p>
+          <p className="text-sm text-gray-500 mt-0.5">
+            共 {professors.length} 位导师
+            {filteredProfessors.length !== professors.length && (
+              <span className="ml-1">· 当前显示 {filteredProfessors.length} 位</span>
+            )}
+          </p>
         </div>
         <div className="flex gap-3">
           <button
@@ -259,15 +343,100 @@ export default function Professors({
         </div>
       </div>
 
+      {/* Overview and filters */}
+      <div className="rounded-xl bg-white p-5 shadow-sm border border-gray-100">
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <div className="rounded-lg border border-gray-100 bg-gray-50 px-3 py-2">
+            <p className="text-xs text-gray-500">地区</p>
+            <p className="mt-1 text-lg font-semibold text-gray-900">{regionSummary.length}</p>
+          </div>
+          <div className="rounded-lg border border-gray-100 bg-gray-50 px-3 py-2">
+            <p className="text-xs text-gray-500">收藏</p>
+            <p className="mt-1 text-lg font-semibold text-gray-900">{totalStarred}</p>
+          </div>
+          <div className="rounded-lg border border-gray-100 bg-gray-50 px-3 py-2">
+            <p className="text-xs text-gray-500">缺邮箱</p>
+            <p className="mt-1 text-lg font-semibold text-gray-900">{totalPendingEmail}</p>
+          </div>
+          <div className="rounded-lg border border-gray-100 bg-gray-50 px-3 py-2">
+            <p className="text-xs text-gray-500">未生成草稿</p>
+            <p className="mt-1 text-lg font-semibold text-gray-900">{totalWithoutDraft}</p>
+          </div>
+        </div>
+
+        <div className="mt-5 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <div className="relative min-w-0 flex-1">
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="搜索导师、学校、院系、研究方向、标签..."
+              className="w-full rounded-lg border border-gray-300 bg-white py-2 pl-9 pr-3 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+            />
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="inline-flex items-center gap-1 text-xs font-medium text-gray-500">
+              <Filter className="h-3.5 w-3.5" />
+              状态
+            </div>
+            {statusFilters.map(({ key, label, count }) => (
+              <button
+                key={key}
+                onClick={() => setStatusFilter(key)}
+                className={`rounded-full border px-3 py-1.5 text-xs font-medium transition-colors ${
+                  statusFilter === key
+                    ? 'border-indigo-500 bg-indigo-50 text-indigo-700'
+                    : 'border-gray-200 bg-white text-gray-600 hover:border-gray-300 hover:bg-gray-50'
+                }`}
+              >
+                {label}
+                <span className="ml-1 text-[10px] text-gray-400">{count}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="mt-4 flex gap-2 overflow-x-auto pb-1">
+          <button
+            onClick={() => setActiveRegion('all')}
+            className={`shrink-0 rounded-lg border px-3 py-2 text-left transition-colors ${
+              activeRegion === 'all'
+                ? 'border-indigo-500 bg-indigo-50 text-indigo-700'
+                : 'border-gray-200 bg-white text-gray-700 hover:bg-gray-50'
+            }`}
+          >
+            <p className="text-xs font-semibold">全部地区</p>
+            <p className="mt-0.5 text-[11px] text-gray-500">{professors.length} 位导师</p>
+          </button>
+          {regionSummary.map(({ region, count, universityCount, pendingEmail }) => (
+            <button
+              key={region}
+              onClick={() => setActiveRegion(region)}
+              className={`shrink-0 rounded-lg border px-3 py-2 text-left transition-colors ${
+                activeRegion === region
+                  ? 'border-indigo-500 bg-indigo-50 text-indigo-700'
+                  : 'border-gray-200 bg-white text-gray-700 hover:bg-gray-50'
+              }`}
+            >
+              <p className="text-xs font-semibold">{REGION_LABELS[region] || region}</p>
+              <p className="mt-0.5 text-[11px] text-gray-500">
+                {universityCount} 校 · {count} 人
+                {pendingEmail > 0 && <span className="ml-1 text-amber-600">{pendingEmail} 缺邮箱</span>}
+              </p>
+            </button>
+          ))}
+        </div>
+      </div>
+
       {/* Add form */}
       {showAdd && (
         <div className="rounded-xl bg-white p-6 shadow-sm border border-gray-100">
           <h3 className="mb-4 text-lg font-semibold">手动添加导师</h3>
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {(['name', 'university', 'email', 'department', 'homepage', 'region'] as const).map((field) => (
+            {(['name', 'university', 'email', 'department', 'homepage', 'google_scholar', 'region'] as const).map((field) => (
               <div key={field}>
                 <label className="block text-sm font-medium text-gray-700 mb-1">
-                  {{name:'姓名*',university:'学校*',email:'邮箱（可选，自动补全）',department:'院系',homepage:'主页',region:'地区'}[field]}
+                  {{name:'姓名*',university:'学校*',email:'邮箱（可选，自动补全）',department:'院系',homepage:'主页',google_scholar:'Google Scholar',region:'地区'}[field]}
                 </label>
                 <input
                   type="text"
@@ -306,12 +475,26 @@ export default function Professors({
           <p className="mt-4 text-gray-500">暂无导师数据</p>
           <p className="mt-1 text-sm text-gray-400">点击"Agent 搜索"让 AI 自动查找导师</p>
         </div>
+      ) : filteredProfessors.length === 0 ? (
+        <div className="rounded-xl bg-white p-12 text-center shadow-sm border border-gray-100">
+          <Search className="mx-auto h-12 w-12 text-gray-200" />
+          <p className="mt-4 text-sm font-medium text-gray-700">没有符合当前筛选的导师</p>
+          <p className="mt-1 text-xs text-gray-400">换一个地区、状态，或清空搜索关键词再试。</p>
+          <button
+            onClick={() => { setActiveRegion('all'); setStatusFilter('all'); setQuery('') }}
+            className="mt-4 rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm text-gray-700 hover:bg-gray-50"
+          >
+            清空筛选
+          </button>
+        </div>
       ) : (
         <div className="space-y-6">
           {grouped.map(([region, uniMap]) => {
             const collapsed = collapsedRegions.has(region)
             const profCount = Object.values(uniMap).reduce((s, arr) => s + arr.length, 0)
             const uniCount = Object.keys(uniMap).length
+            const pendingEmail = Object.values(uniMap).flat().filter((p: any) => isPlaceholderEmail(p.email)).length
+            const sentCount = Object.values(uniMap).flat().filter((p: any) => getEmailStatus(p.id) === 'sent').length
             const gradient = regionColors[region] || 'from-gray-500 to-gray-600'
 
             return (
@@ -330,6 +513,8 @@ export default function Professors({
                     </p>
                     <p className="text-xs text-gray-500">
                       {uniCount} 所学校 · {profCount} 位导师
+                      {pendingEmail > 0 && <span className="ml-1 text-amber-600">· {pendingEmail} 缺邮箱</span>}
+                      {sentCount > 0 && <span className="ml-1 text-green-600">· {sentCount} 已发送</span>}
                     </p>
                   </div>
                   {collapsed ? <ChevronRight className="h-4 w-4 text-gray-400" /> : <ChevronDown className="h-4 w-4 text-gray-400" />}
@@ -351,7 +536,7 @@ export default function Professors({
                           {/* Professor cards */}
                           <div className="grid grid-cols-1 gap-3 p-4 sm:grid-cols-2 lg:grid-cols-3">
                             {profs.map((p: any) => {
-                              const es = emailStatus(p.id)
+                              const es = getEmailStatus(p.id)
                               return (
                                 <div
                                   key={p.id}
@@ -366,8 +551,8 @@ export default function Professors({
                                     <Star className={`h-4 w-4 ${p.is_starred ? 'fill-yellow-400 text-yellow-400' : 'text-gray-300 opacity-0 group-hover:opacity-100 hover:text-yellow-400'}`} />
                                   </button>
                                   {/* Avatar */}
-                                  <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-indigo-400 to-purple-500 text-sm font-bold text-white">
-                                    {initials(p.name)}
+                                  <div className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br ${nameToGradient(p.name)} text-sm font-bold text-white`}>
+                                    {getInitials(p.name)}
                                   </div>
                                   <div className="min-w-0 flex-1">
                                     <div className="flex items-center gap-2">
@@ -379,8 +564,21 @@ export default function Professors({
                                           rel="noreferrer"
                                           onClick={(e) => e.stopPropagation()}
                                           className="text-gray-400 hover:text-indigo-500"
+                                          title="主页"
                                         >
                                           <ExternalLink className="h-3 w-3" />
+                                        </a>
+                                      )}
+                                      {p.google_scholar && (
+                                        <a
+                                          href={p.google_scholar}
+                                          target="_blank"
+                                          rel="noreferrer"
+                                          onClick={(e) => e.stopPropagation()}
+                                          className="text-gray-400 hover:text-indigo-500"
+                                          title="Google Scholar"
+                                        >
+                                          <GraduationCap className="h-3 w-3" />
                                         </a>
                                       )}
                                     </div>

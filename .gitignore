@@ -2,6 +2,9 @@
 backend/config/config.yaml
 backend/config/my_profile.md
 backend/config/cv_*.pdf
+backend/config/transcript_*.pdf
+backend/config/papers/
+backend/config/prompts/
 
 # ── Python ──
 __pycache__/
@@ -21,6 +24,7 @@ env/
 # ── Node / 前端 ──
 frontend/node_modules/
 frontend/dist/
+*.tsbuildinfo
 
 # ── IDE ──
 .idea/
@@ -28,6 +32,9 @@ frontend/dist/
 *.swp
 *.swo
 .DS_Store
+
+# ── 运行时（PID / 日志）──
+.run/
 
 # ── 系统 ──
 Thumbs.db

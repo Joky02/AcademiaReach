@@ -38,6 +38,7 @@ class ProfessorBase(BaseModel):
     university: str
     department: Optional[str] = None
     homepage: Optional[str] = None
+    google_scholar: Optional[str] = None
     research_summary: Optional[str] = None
     recent_papers: Optional[str] = None
     region: Optional[str] = None

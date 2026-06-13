@@ -31,6 +31,7 @@ async def init_db():
                 university TEXT NOT NULL,
                 department TEXT,
                 homepage TEXT,
+                google_scholar TEXT,
                 research_summary TEXT,
                 recent_papers TEXT,
                 region TEXT,
@@ -62,6 +63,18 @@ async def init_db():
                 is_read INTEGER DEFAULT 0,
                 FOREIGN KEY (professor_id) REFERENCES professors(id)
             );
+
+            -- 黑名单：用户叉掉的导师，搜索时跳过避免重复推荐
+            CREATE TABLE IF NOT EXISTS blacklist (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name_norm TEXT NOT NULL,         -- 规范化的姓名（小写+去空格）
+                university_norm TEXT NOT NULL,   -- 规范化的学校
+                name TEXT NOT NULL,              -- 原始姓名（用于展示）
+                university TEXT NOT NULL,        -- 原始学校
+                reason TEXT,                     -- 可选：删除原因
+                created_at TEXT DEFAULT (datetime('now')),
+                UNIQUE(name_norm, university_norm)
+            );
         """)
         await db.commit()
 
@@ -72,6 +85,8 @@ async def init_db():
             await db.execute("ALTER TABLE professors ADD COLUMN is_starred INTEGER DEFAULT 0")
         if "tags" not in cols:
             await db.execute("ALTER TABLE professors ADD COLUMN tags TEXT DEFAULT '[]'")
+        if "google_scholar" not in cols:
+            await db.execute("ALTER TABLE professors ADD COLUMN google_scholar TEXT")
         await db.commit()
     finally:
         await db.close()
@@ -84,12 +99,13 @@ async def create_professor(data: dict) -> dict:
     try:
         cursor = await db.execute(
             """INSERT OR IGNORE INTO professors
-               (name, email, university, department, homepage,
+               (name, email, university, department, homepage, google_scholar,
                 research_summary, recent_papers, region, source, tags)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 data["name"], data["email"], data["university"],
                 data.get("department"), data.get("homepage"),
+                data.get("google_scholar"),
                 data.get("research_summary"), data.get("recent_papers"),
                 data.get("region"), data.get("source", "manual"),
                 data.get("tags", "[]"),
@@ -147,7 +163,8 @@ async def update_professor_info(prof_id: int, data: dict):
     db = await get_db()
     try:
         allowed = {"name", "email", "university", "department", "homepage",
-                   "research_summary", "recent_papers", "region", "tags"}
+                   "google_scholar", "research_summary", "recent_papers",
+                   "region", "tags"}
         sets, vals = [], []
         for k, v in data.items():
             if k in allowed and v is not None:
@@ -316,6 +333,63 @@ async def mark_reply_read(reply_id: int):
         await db.close()
 
 
+# ── Blacklist ─────────────────────────────────────────
+
+
+def _norm(s: str) -> str:
+    """规范化用于黑名单匹配：小写 + 去空格"""
+    return (s or "").strip().lower().replace(" ", "")
+
+
+async def add_to_blacklist(name: str, university: str, reason: Optional[str] = None) -> dict:
+    """加入黑名单（同 name+university 唯一；重复加入静默忽略）"""
+    db = await get_db()
+    try:
+        await db.execute(
+            """INSERT OR IGNORE INTO blacklist
+               (name_norm, university_norm, name, university, reason)
+               VALUES (?, ?, ?, ?, ?)""",
+            (_norm(name), _norm(university), name, university, reason),
+        )
+        await db.commit()
+        return {"name": name, "university": university}
+    finally:
+        await db.close()
+
+
+async def is_blacklisted(name: str, university: str) -> bool:
+    db = await get_db()
+    try:
+        cursor = await db.execute(
+            "SELECT 1 FROM blacklist WHERE name_norm = ? AND university_norm = ?",
+            (_norm(name), _norm(university)),
+        )
+        row = await cursor.fetchone()
+        return row is not None
+    finally:
+        await db.close()
+
+
+async def get_blacklist() -> list[dict]:
+    db = await get_db()
+    try:
+        cursor = await db.execute(
+            "SELECT id, name, university, reason, created_at FROM blacklist ORDER BY created_at DESC"
+        )
+        return [dict(r) for r in await cursor.fetchall()]
+    finally:
+        await db.close()
+
+
+async def remove_from_blacklist(entry_id: int):
+    db = await get_db()
+    try:
+        await db.execute("DELETE FROM blacklist WHERE id = ?", (entry_id,))
+        await db.commit()
+    finally:
+        await db.close()
+
+
 # ── 统计 ──────────────────────────────────────────────
 
 async def get_stats() -> dict:
@@ -328,12 +402,33 @@ async def get_stats() -> dict:
         sent = (await (await db.execute(
             "SELECT COUNT(*) FROM drafts WHERE status = 'sent'"
         )).fetchone())[0]
+        total_drafts = (await (await db.execute("SELECT COUNT(*) FROM drafts")).fetchone())[0]
         replies = (await (await db.execute("SELECT COUNT(*) FROM replies")).fetchone())[0]
+        unread_replies = (await (await db.execute(
+            "SELECT COUNT(*) FROM replies WHERE is_read = 0"
+        )).fetchone())[0]
+        positive_replies = (await (await db.execute(
+            "SELECT COUNT(*) FROM professors WHERE reply_status = 'positive'"
+        )).fetchone())[0]
+        starred_without_draft = (await (await db.execute(
+            """SELECT COUNT(*) FROM professors p
+               WHERE p.is_starred = 1
+                 AND NOT EXISTS (SELECT 1 FROM drafts d WHERE d.professor_id = p.id)"""
+        )).fetchone())[0]
+        # email 待补全：占位邮箱（@tbd）或为空
+        profs_pending_email = (await (await db.execute(
+            "SELECT COUNT(*) FROM professors WHERE email LIKE '%@tbd' OR email IS NULL OR email = ''"
+        )).fetchone())[0]
         return {
             "total_professors": total,
             "drafts_pending": pending,
             "emails_sent": sent,
+            "total_drafts": total_drafts,
             "replies_received": replies,
+            "unread_replies": unread_replies,
+            "positive_replies": positive_replies,
+            "starred_without_draft": starred_without_draft,
+            "profs_pending_email": profs_pending_email,
         }
     finally:
         await db.close()

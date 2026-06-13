@@ -58,9 +58,30 @@ async def get_professor(prof_id: int):
 
 
 @router.delete("/professors/{prof_id}")
-async def delete_professor(prof_id: int):
+async def delete_professor(prof_id: int, blacklist: bool = True):
+    """删除导师；默认同时加入黑名单（后续搜索不再推荐）。
+    传 ?blacklist=false 可仅删除不拉黑。"""
+    prof = await db.get_professor(prof_id)
+    if not prof:
+        raise HTTPException(status_code=404, detail="导师不存在")
+    if blacklist:
+        await db.add_to_blacklist(prof["name"], prof["university"], reason="用户从列表删除")
     await db.delete_professor(prof_id)
-    return {"message": "已删除"}
+    return {"message": "已删除", "blacklisted": blacklist}
+
+
+# ── 黑名单 ────────────────────────────────────────────
+
+
+@router.get("/blacklist")
+async def list_blacklist():
+    return await db.get_blacklist()
+
+
+@router.delete("/blacklist/{entry_id}")
+async def delete_blacklist_entry(entry_id: int):
+    await db.remove_from_blacklist(entry_id)
+    return {"message": "已移出黑名单"}
 
 
 class ProfessorUpdate(BaseModel):
@@ -69,6 +90,7 @@ class ProfessorUpdate(BaseModel):
     university: Optional[str] = None
     department: Optional[str] = None
     homepage: Optional[str] = None
+    google_scholar: Optional[str] = None
     research_summary: Optional[str] = None
     recent_papers: Optional[str] = None
     region: Optional[str] = None
@@ -260,6 +282,64 @@ async def update_profile(data: dict):
     return {"message": "Profile 已更新"}
 
 
+class ProfileGenerateRequest(BaseModel):
+    pitch: Optional[str] = None  # 用户补充说明（PhD 方向、负面清单、地区等）
+
+
+@router.post("/config/profile/generate")
+async def generate_profile_from_cv(req: ProfileGenerateRequest):
+    """从已上传的 CV（优先 cv_cn.pdf）+ 用户补充说明，AI 生成 profile.md 草稿。
+    不直接覆盖 my_profile.md，只返回生成的文本供前端预览编辑后再保存。"""
+    from backend.core.llm import get_llm, load_profile
+    from backend.core.prompts import load_prompt
+    from langchain_core.messages import HumanMessage, SystemMessage
+
+    cv_dir = Path(__file__).parent.parent / "config"
+    cn_path = cv_dir / "cv_cn.pdf"
+    en_path = cv_dir / "cv_en.pdf"
+    cv_path = cn_path if cn_path.exists() else (en_path if en_path.exists() else None)
+    if cv_path is None:
+        raise HTTPException(status_code=400, detail="请先上传 CV（中文或英文），AI 才能基于 CV 生成 Profile")
+
+    try:
+        import pdfplumber
+    except ImportError:
+        raise HTTPException(status_code=500, detail="后端缺少 pdfplumber 依赖，请运行 pip install pdfplumber")
+
+    try:
+        with pdfplumber.open(cv_path) as pdf:
+            pages_text = [(p.extract_text() or "") for p in pdf.pages]
+        cv_text = "\n\n".join(pages_text).strip()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"无法读取 CV PDF（可能文件损坏）: {e}")
+    if not cv_text:
+        raise HTTPException(status_code=400, detail="CV 提取出的文本为空，无法生成（PDF 可能是扫描件）")
+
+    current_profile = load_profile().strip()
+    if current_profile.startswith("# 个人简介\n\n请在此填写"):
+        current_profile = ""
+    current_profile_section = current_profile or "（当前没有已保存 Profile，或 Profile 为空）"
+    pitch_section = (req.pitch or "").strip() or "（用户未提供额外说明，请仅从 CV 推断）"
+
+    try:
+        llm = get_llm()
+        resp = await llm.ainvoke([
+            SystemMessage(content=load_prompt("profile_generator")),
+            HumanMessage(content=f"【CV 原文】\n{cv_text}\n\n【当前已保存 Profile】\n{current_profile_section}\n\n【用户补充说明】\n{pitch_section}"),
+        ])
+        content = (resp.content or "").strip()
+    except Exception as e:
+        logger.exception("Profile 生成失败")
+        raise HTTPException(status_code=500, detail=f"LLM 调用失败: {e}")
+
+    # 去掉万一外层的 ```markdown 包裹
+    if content.startswith("```"):
+        content = content.split("\n", 1)[1] if "\n" in content else content
+        content = content.rsplit("```", 1)[0].rstrip()
+
+    return {"content": content, "cv_source": cv_path.name, "cv_chars": len(cv_text)}
+
+
 @router.get("/config/settings")
 async def get_settings():
     from backend.core.llm import load_yaml_config
@@ -387,20 +467,30 @@ async def update_llm_config(data: LlmConfigUpdate):
 CV_DIR = Path(__file__).parent.parent / "config"
 
 
+PAPERS_DIR = CV_DIR / "papers"
+
+
+def _file_status(path: Path) -> dict:
+    return {
+        "uploaded": path.exists(),
+        "size": path.stat().st_size if path.exists() else 0,
+    }
+
+
 @router.get("/config/cv")
 async def get_cv_status():
-    """获取中英文简历上传状态"""
-    cn_path = CV_DIR / "cv_cn.pdf"
-    en_path = CV_DIR / "cv_en.pdf"
+    """获取所有附件状态：简历 + 成绩单（中/英）+ 论文列表"""
+    papers = []
+    if PAPERS_DIR.exists():
+        for p in sorted(PAPERS_DIR.iterdir()):
+            if p.is_file() and p.suffix.lower() == ".pdf":
+                papers.append({"name": p.name, "size": p.stat().st_size})
     return {
-        "cv_cn": {
-            "uploaded": cn_path.exists(),
-            "size": cn_path.stat().st_size if cn_path.exists() else 0,
-        },
-        "cv_en": {
-            "uploaded": en_path.exists(),
-            "size": en_path.stat().st_size if en_path.exists() else 0,
-        },
+        "cv_cn": _file_status(CV_DIR / "cv_cn.pdf"),
+        "cv_en": _file_status(CV_DIR / "cv_en.pdf"),
+        "transcript_cn": _file_status(CV_DIR / "transcript_cn.pdf"),
+        "transcript_en": _file_status(CV_DIR / "transcript_en.pdf"),
+        "papers": papers,
     }
 
 
@@ -416,6 +506,51 @@ async def upload_cv(lang: str, file: UploadFile = File(...)):
     content = await file.read()
     target.write_bytes(content)
     return {"message": f"{'中文' if lang == 'cn' else '英文'}简历已上传", "size": len(content)}
+
+
+@router.post("/config/transcript/{lang}")
+async def upload_transcript(lang: str, file: UploadFile = File(...)):
+    """上传成绩单 (lang: cn 或 en)"""
+    if lang not in ("cn", "en"):
+        raise HTTPException(status_code=400, detail="lang 必须为 cn 或 en")
+    if not file.filename or not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="仅支持 PDF 格式")
+    target = CV_DIR / f"transcript_{lang}.pdf"
+    content = await file.read()
+    target.write_bytes(content)
+    return {"message": f"{'中文' if lang == 'cn' else '英文'}成绩单已上传", "size": len(content)}
+
+
+def _safe_paper_name(filename: str) -> str:
+    """从用户上传的 filename 提取安全的文件名（防止路径穿越）"""
+    name = Path(filename).name  # 去掉任何路径
+    if not name or not name.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="文件名非法或非 PDF")
+    return name
+
+
+@router.post("/config/papers")
+async def upload_paper(file: UploadFile = File(...)):
+    """上传一篇论文到 papers/（按原文件名保存；同名覆盖）"""
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="缺少文件名")
+    name = _safe_paper_name(file.filename)
+    PAPERS_DIR.mkdir(parents=True, exist_ok=True)
+    target = PAPERS_DIR / name
+    content = await file.read()
+    target.write_bytes(content)
+    return {"message": f"论文 {name} 已上传", "name": name, "size": len(content)}
+
+
+@router.delete("/config/papers/{name}")
+async def delete_paper(name: str):
+    """删除 papers/ 下一篇论文"""
+    safe = _safe_paper_name(name)
+    target = PAPERS_DIR / safe
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="文件不存在")
+    target.unlink()
+    return {"message": f"论文 {safe} 已删除"}
 
 
 # ── 自定义 Prompt 管理 ─────────────────────────────

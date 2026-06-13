@@ -11,3 +11,4 @@ httpx==0.28.1
 aiosqlite==0.20.0
 python-multipart==0.0.20
 websockets==14.1
+pdfplumber==0.11.4

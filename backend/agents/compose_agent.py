@@ -246,13 +246,15 @@ async def compose_emails(
 【申请者背景】
 {profile}
 
-请严格按照四段自然段结构写一封中文套磁邮件。
+请严格按 3 段自然段 + 1 段短签收的结构写一封中文套磁邮件。
 关键要求：
-- 第一段简洁说你是谁、来意
-- 第二段聚焦最匹配的技能和经验，把三到四项硬技能自然嵌入句子（用顿号串联），**全段是流畅散文，禁止 Bullet、连字符、序号、列表**
-- 第三段一句话概括你了解的对方方向，下一句说明因此而联系
-- 第四段附简历 + 希望进一步交流 + 致谢 + 落款
-- 总字数 300-500 字；通篇散文，不出现任何分点排版"""
+- subject 使用「博士申请咨询：[具体研究方向]」格式，方括号内容换成申请者真实研究方向
+- 语言要像真人写给导师的短邮件：标准、清楚、克制；不要宣传稿口吻，不要 AI 套话，不要堆形容词
+- 第一段：身份 + 来意 + 把申请者**最强信号**亮出来；不要暴露弱点
+- 第二段：选一个最匹配的项目，只讲做了什么/结论/能力收获；硬技能用顿号串在句子里，**禁止 Bullet 列表**
+- 第三段（**最关键**）：从【导师研究参考资料】的 representative_papers 里**挑一篇最相关的论文**，说出论文标题或一句话内容，并接一句具体的想法或问题（让导师感到"这个学生真读过我的东西"）；然后说明这正是联系他的原因。**representative_papers 真为空时**才退化为一句方向概括，绝不编造论文标题
+- 签收：附简历 + 期待进一步交流 + 致谢 + 落款
+- 总字数 280-420 字；通篇散文"""
         else:
             user_msg = f"""[Professor Info]
 {prof_info}
@@ -263,13 +265,14 @@ async def compose_emails(
 [Applicant Background]
 {profile}
 
-Write a cold email strictly following the 4-paragraph structure — flowing prose only.
+Write a cold email strictly as 3 content paragraphs + 1 short sign-off. Flowing prose only.
 Key requirements:
-- Paragraph 1: brief intro — who you are, why you're writing
-- Paragraph 2: most-relevant project + capabilities; weave three or four matching skills into a normal sentence (commas / "and"). NO bullets, NO dashes, NO line breaks inside the paragraph
-- Paragraph 3: one sentence on what you know of their direction; next sentence names the alignment as the reason for writing
-- Paragraph 4: attached CV, offer to discuss, thanks, sign-off
-- Total 200-300 words. Plain prose throughout — no bullets, no lists, no Markdown, no AI clichés"""
+- Use standard written academic English with no contractions. Keep it simple, concrete, and human; avoid AI-like phrasing, ornate adjectives, and generic admiration.
+- Paragraph 1: identity, intent, AND surface the applicant's strongest signal. Never expose weaknesses.
+- Paragraph 2: pick ONE most-relevant project; outcome + capabilities only, never process. Weave 3-4 skills into a sentence. NO bullets.
+- Paragraph 3 (**the differentiator**): pick ONE paper from the [Research Reference] representative_papers, name it (title or a one-line description), then add a concrete thought or question about it — make the professor feel you actually read it. Then state that the alignment is why you are writing. **Only fall back to a direction summary if representative_papers is genuinely empty — never fabricate a paper title.**
+- Sign-off: attached CV, offer to discuss, thanks, signature.
+- Total 180-250 words. Plain prose throughout — no bullets, no lists, no Markdown, no AI clichés."""
 
         try:
             response = await llm.ainvoke([
@@ -283,10 +286,11 @@ Key requirements:
                 content = content.rsplit("```", 1)[0]
 
             email_data = json.loads(content)
+            subject = email_data.get("subject", f"PhD Application - {prof['name']}")
 
             draft = await db.create_draft({
                 "professor_id": prof["id"],
-                "subject": email_data.get("subject", f"PhD Application - {prof['name']}"),
+                "subject": subject,
                 "body": email_data.get("body", ""),
                 "language": lang,
             })

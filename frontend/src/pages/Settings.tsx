@@ -1,14 +1,16 @@
 import { useState, useEffect, useRef } from 'react'
 import {
   Save, Loader2, CheckCircle2, Upload, X, Plus, FileText,
-  Mail, Shield, AlertCircle, Eye, EyeOff, Sparkles, Cpu, Code,
+  Mail, Shield, AlertCircle, Eye, EyeOff, Sparkles, Cpu, Code, Ban,
 } from 'lucide-react'
 import {
-  getProfile, updateProfile, getSettings, updateLlmConfig,
-  getCvStatus, uploadCv, updateKeywords,
+  getProfile, updateProfile, generateProfile, getSettings, updateLlmConfig,
+  getCvStatus, uploadCv, uploadTranscript, uploadPaper, deletePaper,
+  updateKeywords,
   getEmailConfig, verifyEmail,
   getPrompts, updatePrompts,
   getPromptTemplates, updatePromptTemplate,
+  getBlacklist, removeFromBlacklist,
 } from '../services/api'
 
 type LlmProvider = 'openai' | 'deepseek' | 'ollama'
@@ -22,6 +24,12 @@ export default function SettingsPage() {
   const [savingProfile, setSavingProfile] = useState(false)
   const [savedProfile, setSavedProfile] = useState(false)
 
+  // Profile AI 生成
+  const [genModalOpen, setGenModalOpen] = useState(false)
+  const [genPitch, setGenPitch] = useState('')
+  const [generating, setGenerating] = useState(false)
+  const [genError, setGenError] = useState<string | null>(null)
+
   // 搜索关键词编辑
   const [keywords, setKeywords] = useState<string[]>([])
   const [regions, setRegions] = useState<string[]>([])
@@ -30,11 +38,14 @@ export default function SettingsPage() {
   const [savingKw, setSavingKw] = useState(false)
   const [savedKw, setSavedKw] = useState(false)
 
-  // 简历上传
+  // 附件（简历 / 成绩单 / 论文）
   const [cvStatus, setCvStatus] = useState<any>(null)
   const [uploading, setUploading] = useState<string | null>(null)
   const cnFileRef = useRef<HTMLInputElement>(null)
   const enFileRef = useRef<HTMLInputElement>(null)
+  const tCnFileRef = useRef<HTMLInputElement>(null)
+  const tEnFileRef = useRef<HTMLInputElement>(null)
+  const paperFileRef = useRef<HTMLInputElement>(null)
 
   // 自定义 Prompt
   const [promptForm, setPromptForm] = useState({
@@ -66,6 +77,11 @@ export default function SettingsPage() {
   const [savingTpl, setSavingTpl] = useState(false)
   const [savedTpl, setSavedTpl] = useState(false)
 
+  // 黑名单
+  type BlacklistEntry = { id: number; name: string; university: string; reason?: string; created_at: string }
+  const [blacklist, setBlacklist] = useState<BlacklistEntry[]>([])
+  const [removingBlId, setRemovingBlId] = useState<number | null>(null)
+
   // 邮箱验证
   const [emailForm, setEmailForm] = useState({
     smtp_host: '', smtp_port: 587, smtp_username: '', smtp_password: '', smtp_use_tls: true,
@@ -77,8 +93,8 @@ export default function SettingsPage() {
   const [verifyResult, setVerifyResult] = useState<any>(null)
 
   const fetchAll = () => {
-    Promise.all([getProfile(), getSettings(), getCvStatus(), getEmailConfig(), getPrompts(), getPromptTemplates()])
-      .then(([profRes, setRes, cvRes, emailRes, promptRes, tplRes]) => {
+    Promise.all([getProfile(), getSettings(), getCvStatus(), getEmailConfig(), getPrompts(), getPromptTemplates(), getBlacklist()])
+      .then(([profRes, setRes, cvRes, emailRes, promptRes, tplRes, blRes]) => {
         setProfile(profRes.data.content)
         setSettings(setRes.data)
         setKeywords(setRes.data.search?.keywords || [])
@@ -118,11 +134,32 @@ export default function SettingsPage() {
           setActiveTpl(tpls[0].name)
           setTplDraft(tpls[0].content)
         }
+        setBlacklist(blRes.data || [])
       })
       .finally(() => setLoading(false))
   }
 
   useEffect(() => { fetchAll() }, [])
+
+  // ── Profile AI 生成 ──
+  const handleGenerateProfile = async () => {
+    // 已有非空 profile 时确认覆盖
+    if (profile.trim() && !confirm('当前 Profile 不是空的，AI 生成的内容会替换 textarea 里的内容（不会自动保存，你可以再编辑再点保存）。继续？')) {
+      return
+    }
+    setGenerating(true)
+    setGenError(null)
+    try {
+      const res = await generateProfile(genPitch.trim() || undefined)
+      setProfile(res.data.content || '')
+      setGenModalOpen(false)
+      setGenPitch('')
+    } catch (e: any) {
+      setGenError(e.response?.data?.detail || e.message || '生成失败')
+    } finally {
+      setGenerating(false)
+    }
+  }
 
   // ── Profile 保存 ──
   const handleSaveProfile = async () => {
@@ -161,6 +198,17 @@ export default function SettingsPage() {
       setTimeout(() => setSavedKw(false), 2000)
     } finally {
       setSavingKw(false)
+    }
+  }
+
+  // ── 黑名单移除 ──
+  const handleRemoveBlacklist = async (id: number) => {
+    setRemovingBlId(id)
+    try {
+      await removeFromBlacklist(id)
+      setBlacklist(blacklist.filter((b) => b.id !== id))
+    } finally {
+      setRemovingBlId(null)
     }
   }
 
@@ -231,14 +279,52 @@ export default function SettingsPage() {
     }
   }
 
-  // ── 简历上传 ──
+  // ── 附件上传 ──
+  const refreshAttachments = async () => {
+    const res = await getCvStatus()
+    setCvStatus(res.data)
+  }
+
   const handleCvUpload = async (lang: 'cn' | 'en', file: File | undefined) => {
     if (!file) return
-    setUploading(lang)
+    setUploading(`cv_${lang}`)
     try {
       await uploadCv(lang, file)
-      const res = await getCvStatus()
-      setCvStatus(res.data)
+      await refreshAttachments()
+    } finally {
+      setUploading(null)
+    }
+  }
+
+  const handleTranscriptUpload = async (lang: 'cn' | 'en', file: File | undefined) => {
+    if (!file) return
+    setUploading(`transcript_${lang}`)
+    try {
+      await uploadTranscript(lang, file)
+      await refreshAttachments()
+    } finally {
+      setUploading(null)
+    }
+  }
+
+  const handlePaperUpload = async (file: File | undefined) => {
+    if (!file) return
+    setUploading(`paper:${file.name}`)
+    try {
+      await uploadPaper(file)
+      await refreshAttachments()
+    } finally {
+      setUploading(null)
+      if (paperFileRef.current) paperFileRef.current.value = ''
+    }
+  }
+
+  const handlePaperDelete = async (name: string) => {
+    if (!confirm(`确定删除论文 "${name}" 吗？`)) return
+    setUploading(`paper-del:${name}`)
+    try {
+      await deletePaper(name)
+      await refreshAttachments()
     } finally {
       setUploading(null)
     }
@@ -755,14 +841,16 @@ export default function SettingsPage() {
         )}
       </div>
 
-      {/* 简历上传 */}
+      {/* 邮件附件：简历 / 成绩单 / 论文 */}
       <div className="rounded-xl bg-white p-6 shadow-sm border border-gray-100">
-        <h3 className="mb-2 text-lg font-semibold text-gray-800">简历附件</h3>
+        <h3 className="mb-2 text-lg font-semibold text-gray-800">邮件附件</h3>
         <p className="mb-4 text-sm text-gray-500">
-          上传中英文简历（PDF），发送邮件时系统会自动根据导师地区附上对应语言的简历
+          发送邮件时附件清单 = 简历 + 成绩单（按导师所在地区自动选中/英）+ <code className="rounded bg-gray-100 px-1">papers/</code> 目录下所有论文。
         </p>
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-          {/* 中文简历 */}
+
+        {/* 简历 */}
+        <p className="text-sm font-medium text-gray-700 mb-2">简历（按导师地区自动选择）</p>
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 mb-5">
           <div className="rounded-lg border-2 border-dashed border-gray-200 p-5 text-center hover:border-indigo-300 transition-colors">
             <FileText className="mx-auto h-8 w-8 text-gray-400" />
             <p className="mt-2 text-sm font-medium text-gray-700">中文简历</p>
@@ -774,15 +862,13 @@ export default function SettingsPage() {
             <input ref={cnFileRef} type="file" accept=".pdf" className="hidden" onChange={(e) => handleCvUpload('cn', e.target.files?.[0])} />
             <button
               onClick={() => cnFileRef.current?.click()}
-              disabled={uploading === 'cn'}
+              disabled={uploading === 'cv_cn'}
               className="mt-3 inline-flex items-center gap-1.5 rounded-lg bg-indigo-50 px-4 py-2 text-sm font-medium text-indigo-600 hover:bg-indigo-100 disabled:opacity-50"
             >
-              {uploading === 'cn' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
+              {uploading === 'cv_cn' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
               {cvStatus?.cv_cn?.uploaded ? '重新上传' : '上传 PDF'}
             </button>
           </div>
-
-          {/* 英文简历 */}
           <div className="rounded-lg border-2 border-dashed border-gray-200 p-5 text-center hover:border-indigo-300 transition-colors">
             <FileText className="mx-auto h-8 w-8 text-gray-400" />
             <p className="mt-2 text-sm font-medium text-gray-700">英文简历 (English CV)</p>
@@ -794,46 +880,221 @@ export default function SettingsPage() {
             <input ref={enFileRef} type="file" accept=".pdf" className="hidden" onChange={(e) => handleCvUpload('en', e.target.files?.[0])} />
             <button
               onClick={() => enFileRef.current?.click()}
-              disabled={uploading === 'en'}
+              disabled={uploading === 'cv_en'}
               className="mt-3 inline-flex items-center gap-1.5 rounded-lg bg-indigo-50 px-4 py-2 text-sm font-medium text-indigo-600 hover:bg-indigo-100 disabled:opacity-50"
             >
-              {uploading === 'en' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
+              {uploading === 'cv_en' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
               {cvStatus?.cv_en?.uploaded ? '重新上传' : '上传 PDF'}
             </button>
           </div>
         </div>
+
+        {/* 成绩单 */}
+        <p className="text-sm font-medium text-gray-700 mb-2">成绩单（按导师地区自动选择）</p>
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 mb-5">
+          <div className="rounded-lg border-2 border-dashed border-gray-200 p-5 text-center hover:border-indigo-300 transition-colors">
+            <FileText className="mx-auto h-8 w-8 text-gray-400" />
+            <p className="mt-2 text-sm font-medium text-gray-700">中文成绩单</p>
+            {cvStatus?.transcript_cn?.uploaded ? (
+              <p className="text-xs text-green-600 mt-1">✓ 已上传 ({formatSize(cvStatus.transcript_cn.size)})</p>
+            ) : (
+              <p className="text-xs text-gray-400 mt-1">未上传</p>
+            )}
+            <input ref={tCnFileRef} type="file" accept=".pdf" className="hidden" onChange={(e) => handleTranscriptUpload('cn', e.target.files?.[0])} />
+            <button
+              onClick={() => tCnFileRef.current?.click()}
+              disabled={uploading === 'transcript_cn'}
+              className="mt-3 inline-flex items-center gap-1.5 rounded-lg bg-indigo-50 px-4 py-2 text-sm font-medium text-indigo-600 hover:bg-indigo-100 disabled:opacity-50"
+            >
+              {uploading === 'transcript_cn' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
+              {cvStatus?.transcript_cn?.uploaded ? '重新上传' : '上传 PDF'}
+            </button>
+          </div>
+          <div className="rounded-lg border-2 border-dashed border-gray-200 p-5 text-center hover:border-indigo-300 transition-colors">
+            <FileText className="mx-auto h-8 w-8 text-gray-400" />
+            <p className="mt-2 text-sm font-medium text-gray-700">英文成绩单 (Transcript)</p>
+            {cvStatus?.transcript_en?.uploaded ? (
+              <p className="text-xs text-green-600 mt-1">✓ 已上传 ({formatSize(cvStatus.transcript_en.size)})</p>
+            ) : (
+              <p className="text-xs text-gray-400 mt-1">未上传</p>
+            )}
+            <input ref={tEnFileRef} type="file" accept=".pdf" className="hidden" onChange={(e) => handleTranscriptUpload('en', e.target.files?.[0])} />
+            <button
+              onClick={() => tEnFileRef.current?.click()}
+              disabled={uploading === 'transcript_en'}
+              className="mt-3 inline-flex items-center gap-1.5 rounded-lg bg-indigo-50 px-4 py-2 text-sm font-medium text-indigo-600 hover:bg-indigo-100 disabled:opacity-50"
+            >
+              {uploading === 'transcript_en' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
+              {cvStatus?.transcript_en?.uploaded ? '重新上传' : '上传 PDF'}
+            </button>
+          </div>
+        </div>
+
+        {/* 论文 */}
+        <div className="flex items-center justify-between mb-2">
+          <p className="text-sm font-medium text-gray-700">论文（全部附上发送）</p>
+          <input ref={paperFileRef} type="file" accept=".pdf" className="hidden" onChange={(e) => handlePaperUpload(e.target.files?.[0])} />
+          <button
+            onClick={() => paperFileRef.current?.click()}
+            disabled={uploading?.startsWith('paper:') || false}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-50 px-3 py-1.5 text-xs font-medium text-indigo-600 hover:bg-indigo-100 disabled:opacity-50"
+          >
+            {uploading?.startsWith('paper:') ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}
+            添加论文
+          </button>
+        </div>
+        {cvStatus?.papers && cvStatus.papers.length > 0 ? (
+          <div className="space-y-2">
+            {cvStatus.papers.map((p: any) => (
+              <div key={p.name} className="flex items-center justify-between rounded-lg border border-gray-200 px-3 py-2">
+                <div className="flex items-center gap-2 min-w-0">
+                  <FileText className="h-4 w-4 text-gray-400 shrink-0" />
+                  <span className="text-sm text-gray-700 truncate">{p.name}</span>
+                  <span className="text-xs text-gray-400 shrink-0">({formatSize(p.size)})</span>
+                </div>
+                <button
+                  onClick={() => handlePaperDelete(p.name)}
+                  disabled={uploading === `paper-del:${p.name}`}
+                  className="text-gray-400 hover:text-red-500 disabled:opacity-50"
+                  title="删除"
+                >
+                  {uploading === `paper-del:${p.name}` ? <Loader2 className="h-4 w-4 animate-spin" /> : <X className="h-4 w-4" />}
+                </button>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="text-xs text-gray-400">暂无论文。点击「添加论文」上传 PDF。同名会覆盖。</p>
+        )}
+      </div>
+
+      {/* 黑名单 */}
+      <div className="rounded-xl bg-white p-6 shadow-sm border border-gray-100">
+        <div className="flex items-center gap-2 mb-2">
+          <Ban className="h-5 w-5 text-red-500" />
+          <h3 className="text-lg font-semibold text-gray-800">导师黑名单</h3>
+          <span className="text-xs text-gray-400">（{blacklist.length}）</span>
+        </div>
+        <p className="text-sm text-gray-500 mb-4">
+          从列表里叉掉的导师会自动加入这里，<b>之后的自动搜索 Agent 不会再推荐他们</b>。从下方移除后可恢复。
+        </p>
+        {blacklist.length === 0 ? (
+          <p className="text-xs text-gray-400">暂无。在导师列表点击 🗑 即可加入。</p>
+        ) : (
+          <div className="space-y-2 max-h-80 overflow-y-auto pr-1">
+            {blacklist.map((b) => (
+              <div key={b.id} className="flex items-center justify-between rounded-lg border border-gray-200 px-3 py-2">
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm text-gray-800 truncate">
+                    {b.name} <span className="text-gray-400">·</span> <span className="text-gray-500">{b.university}</span>
+                  </p>
+                  {b.reason && <p className="text-xs text-gray-400 truncate">{b.reason}</p>}
+                </div>
+                <button
+                  onClick={() => handleRemoveBlacklist(b.id)}
+                  disabled={removingBlId === b.id}
+                  className="ml-3 text-xs text-gray-500 hover:text-indigo-600 disabled:opacity-50 shrink-0"
+                  title="移出黑名单（之后会重新被搜索推荐）"
+                >
+                  {removingBlId === b.id ? <Loader2 className="h-4 w-4 animate-spin" /> : '移出'}
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* Profile 编辑 */}
       <div className="rounded-xl bg-white p-6 shadow-sm border border-gray-100">
         <div className="flex items-center justify-between mb-4">
-          <h3 className="text-lg font-semibold text-gray-800">个人 Profile</h3>
-          <button
-            onClick={handleSaveProfile}
-            disabled={savingProfile}
-            className="inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
-          >
-            {savingProfile ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : savedProfile ? (
-              <CheckCircle2 className="h-4 w-4" />
-            ) : (
-              <Save className="h-4 w-4" />
-            )}
-            {savingProfile ? '保存中...' : savedProfile ? '已保存' : '保存'}
-          </button>
+          <h3 className="text-lg font-semibold text-gray-800">写信参考资料（AI 看的，非简历）</h3>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => { setGenError(null); setGenModalOpen(true) }}
+              className="inline-flex items-center gap-2 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-sm font-medium text-indigo-600 hover:bg-indigo-100"
+              title="从已上传的 CV 自动生成 Profile 草稿"
+            >
+              <Sparkles className="h-4 w-4" />
+              AI 生成
+            </button>
+            <button
+              onClick={handleSaveProfile}
+              disabled={savingProfile}
+              className="inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
+            >
+              {savingProfile ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : savedProfile ? (
+                <CheckCircle2 className="h-4 w-4" />
+              ) : (
+                <Save className="h-4 w-4" />
+              )}
+              {savingProfile ? '保存中...' : savedProfile ? '已保存' : '保存'}
+            </button>
+          </div>
         </div>
         <p className="mb-3 text-sm text-gray-500">
-          填写你的个人信息和研究背景，系统会据此匹配导师和生成套磁邮件（Markdown 格式）
+          这份是 AI 写邮件时的参考资料（研究方向、PhD 计划、项目叙述化讲法、匹配偏好）。CV 已作为附件发给导师，<b>这里不要重复 CV 内容</b>。可点「AI 生成」从 CV 一键生成草稿后再编辑。
         </p>
         <textarea
           value={profile}
           onChange={(e) => setProfile(e.target.value)}
           rows={20}
           className="w-full rounded-lg border border-gray-300 px-4 py-3 font-mono text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
-          placeholder="请填写你的个人信息..."
+          placeholder="点击右上角「AI 生成」从 CV 自动起草，或手动填写..."
         />
       </div>
+
+      {/* AI 生成 Profile 弹窗 */}
+      {genModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={() => !generating && setGenModalOpen(false)}>
+          <div className="w-full max-w-xl rounded-2xl bg-white shadow-2xl overflow-hidden" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-6 py-4 border-b">
+              <div className="flex items-center gap-2">
+                <Sparkles className="h-5 w-5 text-indigo-500" />
+                <h3 className="text-lg font-semibold text-gray-800">从 CV 生成 Profile</h3>
+              </div>
+              <button onClick={() => !generating && setGenModalOpen(false)} disabled={generating} className="text-gray-400 hover:text-gray-600 disabled:opacity-50">
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <div className="p-6 space-y-4">
+              <p className="text-sm text-gray-600">
+                AI 会读取已上传的 CV（优先中文版 <code className="rounded bg-gray-100 px-1">cv_cn.pdf</code>），结合你下方的补充说明，生成一份新的 Profile 草稿放进 textarea。<b>不会自动保存</b>——你可以再编辑后再点「保存」。
+              </p>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1.5">补充说明（可选，但强烈建议填）</label>
+                <p className="text-xs text-gray-400 mb-2">告诉 AI 那些 CV 里没有、但你希望它知道的事。比如：PhD 想偏哪个方向、目标地区、不想做的方向、需要强调或淡化的经历等。</p>
+                <textarea
+                  value={genPitch}
+                  onChange={(e) => setGenPitch(e.target.value)}
+                  rows={6}
+                  disabled={generating}
+                  placeholder="例：PhD 阶段想聚焦在 LLM-for-Optimization 这一条线，不太想做纯组合优化的求解器侧；目标地区中国 / 香港 / 新加坡；不要联系做纯 CV / 系统的导师；可以提一下我的 ICPC 背景作为算法功底信号。"
+                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 disabled:bg-gray-50"
+                />
+              </div>
+              {genError && (
+                <div className="flex items-center gap-2 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">
+                  <AlertCircle className="h-4 w-4 shrink-0" />
+                  {genError}
+                </div>
+              )}
+            </div>
+            <div className="flex items-center justify-end gap-2 px-6 py-4 bg-gray-50 border-t">
+              <button onClick={() => setGenModalOpen(false)} disabled={generating} className="rounded-lg border border-gray-300 px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 disabled:opacity-50">取消</button>
+              <button
+                onClick={handleGenerateProfile}
+                disabled={generating}
+                className="inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
+              >
+                {generating ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+                {generating ? '生成中...' : '生成'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
