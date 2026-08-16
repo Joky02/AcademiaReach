@@ -16,6 +16,8 @@ backend/config/*.pdf
 backend/config/papers
 backend/config/prompts
 backend/config/email_templates
+deploy/cloudflare/config.yml
+deploy/cloudflare/*.json
 frontend/node_modules
 frontend/dist
 dist

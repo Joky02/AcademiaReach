@@ -6,12 +6,19 @@ services:
     restart: unless-stopped
     init: true
     environment:
-      TAOCI_ALLOWED_ORIGINS: ${TAOCI_ALLOWED_ORIGINS:-http://localhost:8080}
+      TAOCI_ALLOWED_ORIGINS: ${TAOCI_ALLOWED_ORIGINS:-http://localhost:5173}
     volumes:
       - ${TAOCI_CONFIG_DIR:-./backend/config}:/app/backend/config
       - ${TAOCI_DATA_DIR:-./backend/data}:/app/backend/data
     expose:
       - "8000"
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     healthcheck:
       test:
         - CMD
@@ -32,20 +39,41 @@ services:
     depends_on:
       backend:
         condition: service_healthy
-    ports:
-      - "127.0.0.1:8080:80"
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
 
   cloudflared:
-    image: cloudflare/cloudflared:latest
+    image: cloudflare/cloudflared:2026.7.1
     restart: unless-stopped
     profiles:
       - tunnel
+    network_mode: service:web
     depends_on:
       web:
         condition: service_healthy
+    volumes:
+      - ${CLOUDFLARED_CONFIG_FILE:-./deploy/cloudflare/config.yml}:/etc/cloudflared/config.yml:ro
+    secrets:
+      - tunnel_credentials
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     command:
       - tunnel
       - --no-autoupdate
+      - --config
+      - /etc/cloudflared/config.yml
       - run
-      - --token
-      - ${CLOUDFLARE_TUNNEL_TOKEN:-replace-with-the-token-from-cloudflare}
+
+secrets:
+  tunnel_credentials:
+    file: ${CLOUDFLARED_CREDENTIALS_FILE:-./deploy/cloudflare/tunnel-credentials.json}

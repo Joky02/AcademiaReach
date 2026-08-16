@@ -8,6 +8,8 @@ backend/config/*.pdf
 backend/config/papers/
 backend/config/prompts/
 backend/config/email_templates/
+deploy/cloudflare/config.yml
+deploy/cloudflare/*.json
 
 # ── Python ──
 __pycache__/

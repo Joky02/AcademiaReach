@@ -1,99 +1,111 @@
 # Docker 与 Cloudflare Tunnel 部署
 
-本方案使用同一个域名提供前端、API 和 WebSocket：
+本方案与 `gold` 项目使用同类结构：本地管理 Named Tunnel，Tunnel JSON 凭据通过 Docker Secret 挂载，`cloudflared` 与 Nginx 共享网络命名空间。
 
 ```text
-Browser -> Cloudflare Access -> Cloudflare Tunnel -> web:80
-                                                    |-- React static files
-                                                    `-- /api -> backend:8000
+Browser -> Cloudflare Access -> Cloudflare Tunnel -> 127.0.0.1:8080
+                                                       |-- React
+                                                       `-- /api -> backend:8000
 ```
 
-Cloudflare Tunnel 只建立由本机发起的出站连接，不需要公网 IP、端口转发或在路由器上开放端口。应用包含个人资料、邮件凭据和 API Key，因此必须同时配置 Cloudflare Access。
+Nginx 只监听容器网络命名空间内的 `127.0.0.1:8080`，Compose 不向宿主机发布端口。因此公网访问不能绕过 Cloudflare Access。Taoci 必须使用独立 Tunnel，不能复用其他项目的 Tunnel UUID 或凭据。
 
-## 1. 本地准备
+## 1. 准备应用
 
 在项目根目录执行：
 
 ```bash
 cp .env.example .env
-```
-
-暂时不要填写 Tunnel Token。先构建应用镜像：
-
-```bash
 docker compose build backend web
 ```
 
-现有的以下目录会直接挂载到容器中，不会创建一套空数据：
+以下目录以可写 bind mount 持久化，真实数据不会进入镜像：
 
-- `backend/config`：API Key、邮件凭据、Profile、附件和私有模板
+- `backend/config`：API Key、邮箱凭据、Profile、附件和私有模板
 - `backend/data`：SQLite 数据库
 
-默认绑定目录可以通过 `.env` 中的 `TAOCI_CONFIG_DIR` 和 `TAOCI_DATA_DIR` 调整。不要把真实配置复制进镜像。
+可以在 `.env` 中通过 `TAOCI_CONFIG_DIR` 和 `TAOCI_DATA_DIR` 指向其他绝对路径。不要把真实配置、Tunnel JSON 凭据或 `.env` 提交到 Git。
 
-如果当前还在用 tmux 启动开发服务，先保持它运行，等 Cloudflare Tunnel 和 Access 都配置完成后再进行第 5 步的正式切换。不要让 tmux 后端与 Docker 后端长期同时读取同一个 SQLite 数据库或轮询同一个邮箱。
+如果当前仍由 tmux 运行开发服务，先保持它运行。完成 Tunnel 和 Access 配置后再切换，避免 Docker 后端与旧后端长期同时写同一个 SQLite 数据库或轮询同一个邮箱。
 
-## 2. 在 Cloudflare 创建 Tunnel
+## 2. 创建独立 Named Tunnel
 
-前提：域名已经添加到 Cloudflare，并正在使用 Cloudflare DNS。
+先按照 Cloudflare 官方说明安装 `cloudflared`。域名必须已经接入 Cloudflare DNS。
 
-1. 登录 Cloudflare Dashboard。
-2. 进入 **Networking > Tunnels**。
-3. 选择 **Create a tunnel**，连接器选择 **Cloudflared**。
-4. Tunnel 名称填写 `taoci`，然后创建。
-5. 在安装连接器页面选择 **Docker**。
-6. 复制命令中 `--token` 后面的长字符串。这个 Token 等同于 Tunnel 凭据，不要发到聊天、截图或提交到 Git。
-7. 打开项目根目录的 `.env`，填写：
-
-```dotenv
-CLOUDFLARE_TUNNEL_TOKEN=这里填写刚才复制的Token
-TAOCI_ALLOWED_ORIGINS=http://localhost:8080
+```bash
+cloudflared tunnel login
+cloudflared tunnel create taoci
+cloudflared tunnel route dns taoci taoci.example.com
 ```
 
-生产访问是同源请求，不需要把公网域名加入 CORS；保留 localhost 是为了本机调试。
+第二条命令会输出 Tunnel UUID，并在 `~/.cloudflared/` 创建对应的 `<UUID>.json`。这个 JSON 等同于 Tunnel 凭据，不要移动到项目目录，不要发送到聊天，也不要复用 `gold` 或其他服务的凭据。
 
-## 3. 配置域名路由
+复制部署模板：
 
-回到刚创建的 Tunnel：
+```bash
+cp deploy/cloudflare/config.yml.example deploy/cloudflare/config.yml
+```
 
-1. 打开 **Routes**。
-2. 选择 **Add route > Published application**。
-3. Subdomain 填写需要的子域名，例如 `taoci`。
-4. Domain 选择自己的域名，例如 `example.com`。
-5. Path 留空。
-6. Service type 选择 `HTTP`。
-7. Service URL 填写 `http://web:80`。
-8. 保存。
+编辑 `deploy/cloudflare/config.yml`：
 
-最终地址为 `https://taoci.example.com`。这里必须填写 Compose 服务名 `web`，不要填写 `localhost`，因为 `cloudflared` 运行在独立容器中。
+- 将 `REPLACE_WITH_TAOCI_TUNNEL_UUID` 替换为新建 Tunnel 的 UUID。
+- 将 `taoci.example.com` 替换为实际域名，必须与 DNS 路由一致。
+- 暂时保留 Access 占位符，完成下一步后再填写。
 
-## 4. 配置 Cloudflare Access
+编辑根目录 `.env`：
 
-不要在 Access 配好之前把应用长期暴露在公网。
+```dotenv
+CLOUDFLARED_CONFIG_FILE=./deploy/cloudflare/config.yml
+CLOUDFLARED_CREDENTIALS_FILE=/home/你的WSL用户名/.cloudflared/这里填写UUID.json
+TAOCI_ALLOWED_ORIGINS=http://localhost:5173
+TAOCI_CONFIG_DIR=./backend/config
+TAOCI_DATA_DIR=./backend/data
+```
+
+生产环境的浏览器请求与 API 同源，不需要把公网域名加入 CORS。`TAOCI_ALLOWED_ORIGINS` 只用于 Vite 本地开发。
+
+## 3. 配置 Cloudflare Access
+
+应用包含个人资料、邮件凭据和 API Key，必须在启动 Tunnel 前配置 Access。
 
 1. 进入 **Zero Trust > Access controls > Applications**。
-2. 选择 **Add an application > Self-hosted**。
+2. 选择 **Create new application > Self-hosted and private > Add public hostname**。
 3. Application name 填写 `Taoci`。
 4. Application domain 填写完整域名，例如 `taoci.example.com`。
-5. 新建一条 `Allow` Policy。
-6. Include 规则选择 **Emails**，只填写允许访问的个人邮箱。
-7. Session duration 建议设为 `24 hours`。
-8. 保存应用和 Policy。
+5. 添加 `Allow` Policy，使用具体的 **Emails** 或 **Cloudflare account member** 限制身份。
+6. 不要使用 `Include Everyone`；Session duration 可设为 `24 hours`。
+7. 保存后复制该应用的 **Application Audience (AUD) Tag**。
 
-新建的 Zero Trust 组织通常已经配置 Cloudflare 自身作为默认身份提供商，适合只允许 Cloudflare 账户成员访问，并可直接使用账户上的 MFA。需要通过普通邮箱验证码登录时，进入 **Zero Trust > Integrations > Identity providers**，选择 **Add new identity provider > One-time PIN**。无论使用哪种登录方式，Access Policy 都必须用具体的 **Emails** 或 **Cloudflare account member** 限制身份；不要使用 `Include Everyone`，也不要只用 `Login Methods: One-time PIN` 作为 Include 条件。
+需要邮箱验证码登录时，可在 **Zero Trust > Integrations > Identity providers** 中启用 **One-time PIN**。身份提供商只负责登录方式，真正的访问范围仍由上述 Allow Policy 决定。
 
-完成后使用无痕窗口访问域名，应该先看到 Cloudflare 登录页，而不是应用页面。
+回到 `deploy/cloudflare/config.yml`：
 
-## 5. 启动 Tunnel
+- `teamName` 填写 Zero Trust 团队域名中 `.cloudflareaccess.com` 前面的部分。
+- `audTag` 填写刚才复制的 Application Audience Tag。
 
-先关闭旧的 tmux 开发服务：
+这里的 `access.required` 会让 connector 在转发到 Nginx 前再次验证 Access JWT。配置中的 `protocol: http2` 与 `gold` 保持一致，可避开 Docker Desktop/WSL 环境中偶发的 QUIC 连接问题。
+
+## 4. 检查并启动
+
+先检查 Compose 和 Tunnel 配置：
+
+```bash
+docker compose config
+docker compose --profile tunnel config
+docker run --rm \
+  -v "$PWD/deploy/cloudflare/config.yml:/etc/cloudflared/config.yml:ro" \
+  cloudflare/cloudflared:2026.7.1 \
+  tunnel --config /etc/cloudflared/config.yml ingress validate
+```
+
+确认无误后关闭旧的 tmux 开发服务：
 
 ```bash
 tmux kill-session -t taoci-backend
 tmux kill-session -t taoci-frontend
 ```
 
-再启动生产容器：
+启动生产容器：
 
 ```bash
 docker compose --profile tunnel up -d --build
@@ -101,13 +113,16 @@ docker compose ps
 docker compose logs --tail=100 cloudflared
 ```
 
-Cloudflare Dashboard 中 Tunnel 状态应变为 `Healthy`。然后验证：
+Cloudflare Dashboard 中 Tunnel 状态应变为 `Healthy`。此时应用没有 `localhost:8080` 入口，只能通过受 Access 保护的域名访问。
 
-1. `http://localhost:8080` 仍可从本机访问。
-2. 公网域名先要求 Cloudflare Access 登录。
-3. 登录后导师列表和草稿可以加载。
-4. 启动一次自动补全，确认右下角后台任务状态可以实时更新，以验证 WebSocket。
-5. 上传一个小型测试 PDF，确认 Nginx 的上传限制和附件持久化正常。
+本机健康检查可以在容器内执行：
+
+```bash
+docker compose exec web wget -qO- http://127.0.0.1:8080/healthz
+docker compose exec web wget -qO- http://127.0.0.1:8080/api/stats
+```
+
+最后用无痕窗口访问公网域名，确认先出现 Cloudflare 登录页；登录后检查导师列表、草稿、附件上传和自动补全任务的实时状态。
 
 ## 日常运维
 
@@ -118,7 +133,7 @@ docker compose ps
 # 查看日志
 docker compose logs --tail=200 backend web cloudflared
 
-# 更新并重建应用
+# 更新并重建
 git pull
 docker compose --profile tunnel up -d --build
 
@@ -126,13 +141,14 @@ docker compose --profile tunnel up -d --build
 docker compose --profile tunnel down
 ```
 
-不要使用 `down -v`，本方案当前使用 bind mount 保存数据，但养成不删除卷的习惯可以避免以后切换存储方式时误删数据。电脑睡眠、关机或 Docker Desktop 停止后，Tunnel 会离线；需要 24 小时可用时，应部署到常开的服务器、NAS 或 VPS。
+不要使用 `down -v`。电脑睡眠、关机或 Docker Desktop 停止后，Tunnel 会离线；需要全天可用时，应迁移到常开的服务器、NAS 或 VPS。
 
 ## Cloudflare 官方参考
 
-- [通过 Dashboard 创建 Tunnel](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/get-started/create-remote-tunnel/)
-- [配置 Published application](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/routing-to-tunnel/)
+- [创建本地管理的 Tunnel](https://developers.cloudflare.com/tunnel/advanced/local-management/create-local-tunnel/)
+- [Tunnel 配置文件](https://developers.cloudflare.com/tunnel/advanced/local-management/configuration-file/)
+- [Origin 与 Access 验证参数](https://developers.cloudflare.com/tunnel/advanced/origin-parameters/)
 - [添加 Self-hosted Access 应用](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/)
-- [配置 Cloudflare 身份提供商](https://developers.cloudflare.com/cloudflare-one/integrations/identity-providers/cloudflare/)
+- [Access Policy](https://developers.cloudflare.com/cloudflare-one/access-controls/policies/)
 - [配置 One-time PIN](https://developers.cloudflare.com/cloudflare-one/integrations/identity-providers/one-time-pin/)
 - [Cloudflare WebSocket 支持](https://developers.cloudflare.com/network/websockets/)

@@ -1,0 +1,16 @@
+tunnel: REPLACE_WITH_TAOCI_TUNNEL_UUID
+credentials-file: /run/secrets/tunnel_credentials
+protocol: http2
+
+ingress:
+  - hostname: taoci.example.com
+    service: http://127.0.0.1:8080
+    originRequest:
+      httpHostHeader: localhost:8080
+      connectTimeout: 10s
+      access:
+        required: true
+        teamName: REPLACE_WITH_ACCESS_TEAM_NAME
+        audTag:
+          - REPLACE_WITH_ACCESS_APPLICATION_AUD_TAG
+  - service: http_status:404
