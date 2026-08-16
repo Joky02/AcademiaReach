@@ -24,7 +24,9 @@
 
 | 模块 | 功能 |
 |------|------|
+| **全局 LLM 后端** | 在设置页选择 Codex App Server、OpenAI 兼容 API、DeepSeek 或 Ollama；Codex 使用任务专属 harness 且不需要 API Key |
 | **导师搜索** | 官方 Codex SDK 结合实时网页搜索，从学校主页、Google Scholar 和 CSRankings 中发现新导师；Serper 可作为备用 |
+| **Deep Research** | Codex 使用实时网页 research harness；其他后端使用 Serper 搜索结果和所选 LLM |
 | **邮件撰写** | 根据导师研究方向 + 用户 Profile，LLM 生成个性化套磁邮件（中/英文自动切换） |
 | **邮件发送** | 草稿人工审核 → 编辑 → 确认发送（SMTP），支持附带中/英文 PDF 简历 |
 | **回复跟踪** | IMAP 轮询收件箱，双策略匹配导师回复（FROM 匹配 + 主题匹配），自动更新状态 |
@@ -40,7 +42,7 @@
 **后端**
 - Python 3.11, FastAPI, Uvicorn
 - 官方 Codex Python SDK + 宿主机 App Server Worker
-- LangChain (OpenAI / DeepSeek / Ollama 多后端)
+- 兼容 LangChain 的 Codex / OpenAI / DeepSeek / Ollama 多后端
 - SQLite (aiosqlite), Pydantic v2
 - SMTP 发送, IMAP 收件, WebSocket
 
@@ -137,8 +139,8 @@ cp backend/prompts/compose_cn.md backend/config/prompts/compose_cn.md
 ```
 
 编辑 `backend/config/config.yaml`，填入：
-- **LLM API Key** — OpenAI / DeepSeek / Ollama 任选其一（支持兼容 OpenAI 格式的第三方 API）
-- **搜索 provider** — `codex` 复用本机 Codex 登录；`serper` 仅作为旧版搜索或显式回退
+- **全局 LLM provider** — Codex 复用 `codex login`；OpenAI / DeepSeek 需要 API Key；Ollama 使用本地模型
+- **搜索 provider** — `auto` 跟随全局后端；Codex 使用专用搜索 harness，其他后端使用 Serper 工具链
 - **SMTP 凭据** — 发件邮箱（也可在前端设置页验证并保存）
 - **IMAP 凭据** — 收件邮箱，用于回复跟踪
 
@@ -182,7 +184,10 @@ npm run dev
 
 ```yaml
 llm:
-  provider: openai                  # openai / deepseek / ollama
+  provider: codex                   # codex / openai / deepseek / ollama
+  codex:
+    model: ""                       # 留空使用账号默认模型
+    timeout_seconds: 600
   openai:
     api_key: "sk-..."
     model: "gpt-4o"
@@ -196,7 +201,7 @@ llm:
     base_url: "http://localhost:11434"
 
 search:
-  provider: codex                    # codex / serper
+  provider: auto                     # auto / codex / serper；全局 Codex 始终使用自身 harness
   codex:
     timeout_seconds: 900
     fallback_to_serper: false
@@ -244,11 +249,11 @@ prompts:
 ## 使用指南
 
 1. **Dashboard** — 查看导师总数、已发送、已回复等统计，以及实时搜索/生成日志
-2. **导师管理** — 点击"自动搜索"配置关键词和地区后，让 Codex 搜索并核验新导师，或手动添加导师；点击导师卡片查看详情
+2. **导师管理** — 点击"自动搜索"配置关键词和地区后，使用当前选择的后端搜索新导师，或手动添加导师；点击导师卡片查看详情
 3. **邮件草稿** — 点击"生成草稿"为所有未生成邮件的导师批量生成套磁邮件；可预览、编辑正文和主题、跳过不需要的
 4. **已发送** — 查看所有已发送邮件及发送时间
 5. **回复跟踪** — 系统每 5 分钟自动轮询 IMAP 收件箱（双策略：FROM 精确匹配 + SUBJECT 主题匹配），也可手动点击"检查回复"
-6. **设置** — 编辑 Profile / 搜索关键词与地区 / 自定义 Agent 行为 / 上传简历 / 验证邮箱凭据
+6. **设置** — 选择全局 LLM 后端，编辑 Profile / 搜索偏好，自定义 Agent 行为，上传附件并验证邮箱凭据
 
 ---
 

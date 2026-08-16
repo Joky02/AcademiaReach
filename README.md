@@ -24,8 +24,9 @@
 
 | Module | Description |
 |--------|-------------|
+| **Global LLM Backend** | Select Codex App Server, OpenAI-compatible APIs, DeepSeek, or Ollama from Settings; Codex uses task-specific harnesses without an API key |
 | **Professor Search** | Official Codex SDK + live web search auto-discovers new professors from official pages, Google Scholar, and CSRankings; Serper remains an optional fallback |
-| **Deep Research** | Before composing, automatically searches for each professor's representative papers and analyzes them with LLM |
+| **Deep Research** | Codex uses its live-web research harness; other providers use Serper results plus the selected LLM |
 | **Email Composition** | LLM generates personalized cold emails based on professor's research + your profile (auto CN/EN switching) |
 | **Email Sending** | Human-reviewed drafts → edit → confirm → send via SMTP, with optional CN/EN PDF CV attachment |
 | **Reply Tracking** | IMAP inbox polling with dual matching strategy (FROM address + SUBJECT line) to catch replies reliably |
@@ -41,7 +42,7 @@
 **Backend**
 - Python 3.11, FastAPI, Uvicorn
 - Official Codex Python SDK + host-side App Server worker
-- LangChain (OpenAI / DeepSeek / Ollama multi-backend)
+- LangChain-compatible Codex / OpenAI / DeepSeek / Ollama providers
 - SQLite (aiosqlite), Pydantic v2
 - SMTP sending, IMAP receiving, WebSocket
 
@@ -139,8 +140,8 @@ cp backend/prompts/compose_cn.md backend/config/prompts/compose_cn.md
 ```
 
 Edit `backend/config/config.yaml` and fill in:
-- **LLM API Key** — OpenAI / DeepSeek / Ollama (also supports OpenAI-compatible third-party APIs)
-- **Search provider** — `codex` reuses the local Codex login; `serper` is an optional legacy provider/fallback
+- **Global LLM provider** — Codex reuses `codex login`; OpenAI / DeepSeek require an API key; Ollama is local
+- **Search provider** — `auto` follows the global provider; Codex uses its search harness, while other providers use the Serper tool chain
 - **SMTP credentials** — Outgoing email (can also be verified and saved from the UI)
 - **IMAP credentials** — Incoming email, used for reply tracking
 
@@ -184,7 +185,10 @@ Open **http://localhost:5173** in your browser.
 
 ```yaml
 llm:
-  provider: openai                  # openai / deepseek / ollama
+  provider: codex                   # codex / openai / deepseek / ollama
+  codex:
+    model: ""                       # Empty uses the account default
+    timeout_seconds: 600
   openai:
     api_key: "sk-..."
     model: "gpt-4o"
@@ -198,7 +202,7 @@ llm:
     base_url: "http://localhost:11434"
 
 search:
-  provider: codex                    # codex / serper
+  provider: auto                     # auto / codex / serper; global Codex always uses its harness
   codex:
     timeout_seconds: 900
     fallback_to_serper: false
@@ -246,11 +250,11 @@ Upload CN/EN PDF CVs in the Settings page. When sending emails, the system autom
 ## Usage Guide
 
 1. **Dashboard** — View stats (total professors, sent, replied) and live search/compose logs
-2. **Professors** — Click "Auto Search" to configure keywords and regions, then let Codex discover and verify new professors; or add manually. Click a professor card for details
+2. **Professors** — Click "Auto Search" to configure keywords and regions, then use the selected backend to discover new professors; or add manually. Click a professor card for details
 3. **Drafts** — Click "Generate Drafts" to batch-compose emails for all professors without drafts. Deep Research runs automatically for each professor before composing. Preview, edit subject/body, or skip as needed
 4. **Sent** — View all sent emails and timestamps
 5. **Replies** — System polls IMAP every 5 minutes (dual strategy: FROM exact match + SUBJECT match). You can also click "Check Replies" manually
-6. **Settings** — Edit Profile / Search keywords & regions / Customize Agent behavior / Upload CV / Verify email credentials
+6. **Settings** — Select the global LLM backend, edit Profile / search preferences, customize Agent behavior, upload attachments, and verify email credentials
 
 ---
 

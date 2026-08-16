@@ -44,7 +44,7 @@
 - 只保存大学教授/研究员，不保存学生或公司人员
 - region 填导师当前任职学校所在的国家/地区（如 US, China, UK, Singapore），不是国籍
 - email 必须是搜索结果能支持的真实邮箱；如果仍找不到，可以留空，save_professor 会用占位邮箱，但你应该先认真补全
-- 很多导师主页会用反爬格式写邮箱，必须读懂并还原后保存，例如 `dongbin {at} math {dot} pku {dot} edu {dot} cn` 应保存为 `dongbin@math.pku.edu.cn`；常见形式包括 `{at}`、`[at]`、`(at)`、` at `、`{dot}`、`[dot]`、`(dot)`、` dot `
+- 很多导师主页会用反爬格式写邮箱，必须读懂并还原后保存，例如 `name {at} university {dot} edu` 应保存为 `name@university.edu`；常见形式包括 `{at}`、`[at]`、`(at)`、` at `、`{dot}`、`[dot]`、`(dot)`、` dot `
 - google_scholar 是导师的 Google Scholar 个人主页 URL（形如 https://scholar.google.com/citations?user=XXXX），找到了就填
 - tags 可选值：中国头衔（"院士","杰青","优青","长江学者","青千","博导"），国际头衔（"Fellow","AP","Associate Prof","Full Prof"）
 - 搜索结果中找不到的字段留空即可，绝不编造

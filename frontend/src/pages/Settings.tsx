@@ -13,7 +13,7 @@ import {
   getBlacklist, removeFromBlacklist,
 } from '../services/api'
 
-type LlmProvider = 'openai' | 'deepseek' | 'ollama'
+type LlmProvider = 'codex' | 'openai' | 'deepseek' | 'ollama'
 
 export default function SettingsPage() {
   const [profile, setProfile] = useState('')
@@ -63,6 +63,7 @@ export default function SettingsPage() {
   // LLM 后端配置
   const [llmProvider, setLlmProvider] = useState<LlmProvider>('openai')
   const [llmForm, setLlmForm] = useState({
+    codex: { model: '', timeout_seconds: 600 },
     openai: { model: '', base_url: '', api_key: '', api_key_set: false },
     deepseek: { model: '', base_url: '', api_key: '', api_key_set: false },
     ollama: { model: '', base_url: '' },
@@ -104,6 +105,10 @@ export default function SettingsPage() {
         const llm = setRes.data.llm || {}
         setLlmProvider((llm.provider as LlmProvider) || 'openai')
         setLlmForm({
+          codex: {
+            model: llm.codex?.model || '',
+            timeout_seconds: llm.codex?.timeout_seconds || 600,
+          },
           openai: {
             model: llm.openai?.model || '',
             base_url: llm.openai?.base_url || 'https://api.openai.com/v1',
@@ -252,7 +257,12 @@ export default function SettingsPage() {
     setSavingLlm(true)
     try {
       const payload: any = { provider: llmProvider }
-      if (llmProvider === 'ollama') {
+      if (llmProvider === 'codex') {
+        payload.codex = {
+          model: llmForm.codex.model,
+          timeout_seconds: llmForm.codex.timeout_seconds,
+        }
+      } else if (llmProvider === 'ollama') {
         payload.ollama = { model: llmForm.ollama.model, base_url: llmForm.ollama.base_url }
       } else {
         const sub = llmForm[llmProvider]
@@ -377,12 +387,12 @@ export default function SettingsPage() {
                 <span>搜索 Agent</span>
               </div>
               <p className="mt-1 text-xs text-gray-400">
-                {settings.search?.provider === 'codex' ? 'Codex SDK' : 'Serper'}
+                {settings.search?.effective_provider === 'codex' ? 'Codex SDK' : 'Serper'}
               </p>
               <p className="mt-1 font-medium">
-                {settings.search?.provider === 'codex' && settings.search?.codex?.available ? (
+                {settings.search?.effective_provider === 'codex' && settings.search?.codex?.available ? (
                   <span className="text-green-600">已连接</span>
-                ) : settings.search?.provider === 'codex' ? (
+                ) : settings.search?.effective_provider === 'codex' ? (
                   <span className="text-red-500">Worker 未运行</span>
                 ) : settings.search?.serper_api_key_set ? (
                   <span className="text-green-600">已配置</span>
@@ -440,9 +450,9 @@ export default function SettingsPage() {
 
         <div className="mb-5">
           <label className="block text-sm font-medium text-gray-700 mb-1.5">Provider</label>
-          <p className="text-xs text-gray-400 mb-2">切换搜索 / 邮件生成 Agent 使用的 LLM 后端</p>
-          <div className="flex gap-2">
-            {(['openai', 'deepseek', 'ollama'] as LlmProvider[]).map((p) => (
+          <p className="text-xs text-gray-400 mb-2">切换邮件生成、Profile、研究分析和信息提取使用的全局后端</p>
+          <div className="flex flex-wrap gap-2">
+            {(['codex', 'openai', 'deepseek', 'ollama'] as LlmProvider[]).map((p) => (
               <button
                 key={p}
                 onClick={() => setLlmProvider(p)}
@@ -452,13 +462,62 @@ export default function SettingsPage() {
                     : 'border-gray-200 text-gray-600 hover:bg-gray-50'
                 }`}
               >
-                {p === 'openai' ? 'OpenAI 兼容' : p === 'deepseek' ? 'DeepSeek' : 'Ollama (本地)'}
+                {p === 'codex' ? 'Codex App Server' : p === 'openai' ? 'OpenAI 兼容' : p === 'deepseek' ? 'DeepSeek' : 'Ollama (本地)'}
               </button>
             ))}
           </div>
         </div>
 
-        {llmProvider !== 'ollama' && (
+        {llmProvider === 'codex' && (
+          <div className="space-y-3">
+            <div className={`flex items-center gap-2 rounded-lg border px-3 py-2 text-sm ${
+              settings?.llm?.codex?.available
+                ? 'border-green-200 bg-green-50 text-green-700'
+                : 'border-red-200 bg-red-50 text-red-700'
+            }`}>
+              {settings?.llm?.codex?.available ? (
+                <CheckCircle2 className="h-4 w-4" />
+              ) : (
+                <AlertCircle className="h-4 w-4" />
+              )}
+              {settings?.llm?.codex?.available
+                ? 'Codex Worker 已连接，将复用当前 ChatGPT 登录'
+                : 'Codex Worker 未运行，保存后相关功能将无法调用'}
+            </div>
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">Model（可选）</label>
+              <input
+                value={llmForm.codex.model}
+                onChange={(e) => setLlmForm({
+                  ...llmForm,
+                  codex: { ...llmForm.codex, model: e.target.value },
+                })}
+                placeholder="留空使用账号默认模型"
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+              />
+            </div>
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">任务超时（秒）</label>
+              <input
+                type="number"
+                min={30}
+                max={1800}
+                value={llmForm.codex.timeout_seconds}
+                onChange={(e) => setLlmForm({
+                  ...llmForm,
+                  codex: {
+                    ...llmForm.codex,
+                    timeout_seconds: Math.max(30, Number(e.target.value) || 600),
+                  },
+                })}
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+              />
+            </div>
+            <p className="text-xs text-gray-400">Codex 使用独立 harness，不需要 API Key 或 Base URL。</p>
+          </div>
+        )}
+
+        {(llmProvider === 'openai' || llmProvider === 'deepseek') && (
           <div className="space-y-3">
             <div>
               <label className="block text-xs text-gray-500 mb-1">Model</label>

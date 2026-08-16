@@ -25,6 +25,7 @@ from backend.core.models import (
     ProfessorCreate, DraftUpdate, SearchRequest,
 )
 from backend.core.codex_client import get_codex_worker_status
+from backend.core.codex_llm import codex_invoke_options
 from backend.agents.search_agent import search_professors, enrich_professor
 from backend.agents.compose_agent import compose_emails
 from backend.services.send_service import send_email, send_batch
@@ -490,7 +491,7 @@ async def generate_profile_from_cv(req: ProfileGenerateRequest):
         resp = await llm.ainvoke([
             SystemMessage(content=load_prompt("profile_generator")),
             HumanMessage(content=f"【CV 原文】\n{cv_text}\n\n【当前已保存 Profile】\n{current_profile_section}\n\n【用户补充说明】\n{pitch_section}"),
-        ])
+        ], **codex_invoke_options(llm, "profile"))
         content = (resp.content or "").strip()
     except Exception as e:
         logger.exception("Profile 生成失败")
@@ -519,9 +520,22 @@ async def get_settings():
         }
     search_cfg = cfg.get("search", {}) or {}
     codex_status = await get_codex_worker_status()
+    configured_search_provider = search_cfg.get("provider", "auto")
+    effective_search_provider = configured_search_provider
+    if llm_cfg.get("provider") == "codex":
+        effective_search_provider = "codex"
+    elif configured_search_provider == "auto":
+        effective_search_provider = "serper"
     safe_cfg = {
         "llm": {
             "provider": llm_cfg.get("provider", "openai"),
+            "codex": {
+                "model": (llm_cfg.get("codex", {}) or {}).get("model", ""),
+                "timeout_seconds": (
+                    llm_cfg.get("codex", {}) or {}
+                ).get("timeout_seconds", 600),
+                "available": bool(codex_status.get("available")),
+            },
             "openai": _llm_sub("openai", "https://api.openai.com/v1"),
             "deepseek": _llm_sub("deepseek", "https://api.deepseek.com/v1"),
             "ollama": {
@@ -530,7 +544,8 @@ async def get_settings():
             },
         },
         "search": {
-            "provider": search_cfg.get("provider", "serper"),
+            "provider": configured_search_provider,
+            "effective_provider": effective_search_provider,
             "keywords": search_cfg.get("keywords", []),
             "regions": search_cfg.get("regions", []),
             "max_professors": search_cfg.get("max_professors", 20),
@@ -597,10 +612,12 @@ class LlmProviderSub(BaseModel):
     model: Optional[str] = None
     base_url: Optional[str] = None
     api_key: Optional[str] = None  # 空字符串表示"不修改"，避免前端没回显时误清空
+    timeout_seconds: Optional[int] = None
 
 
 class LlmConfigUpdate(BaseModel):
     provider: str
+    codex: Optional[LlmProviderSub] = None
     openai: Optional[LlmProviderSub] = None
     deepseek: Optional[LlmProviderSub] = None
     ollama: Optional[LlmProviderSub] = None
@@ -609,8 +626,11 @@ class LlmConfigUpdate(BaseModel):
 @router.put("/config/llm")
 async def update_llm_config(data: LlmConfigUpdate):
     """切换 LLM provider 并更新对应 provider 的 model/base_url/api_key"""
-    if data.provider not in ("openai", "deepseek", "ollama"):
-        raise HTTPException(status_code=400, detail="provider 必须是 openai/deepseek/ollama")
+    if data.provider not in ("codex", "openai", "deepseek", "ollama"):
+        raise HTTPException(
+            status_code=400,
+            detail="provider 必须是 codex/openai/deepseek/ollama",
+        )
 
     from backend.core.llm import CONFIG_PATH, load_yaml_config
     cfg = load_yaml_config()
@@ -618,7 +638,7 @@ async def update_llm_config(data: LlmConfigUpdate):
         cfg["llm"] = {}
     cfg["llm"]["provider"] = data.provider
 
-    for name in ("openai", "deepseek", "ollama"):
+    for name in ("codex", "openai", "deepseek", "ollama"):
         sub: Optional[LlmProviderSub] = getattr(data, name)
         if sub is None:
             continue
@@ -627,6 +647,11 @@ async def update_llm_config(data: LlmConfigUpdate):
             existing["model"] = sub.model
         if sub.base_url is not None:
             existing["base_url"] = sub.base_url
+        if sub.timeout_seconds is not None:
+            existing["timeout_seconds"] = max(
+                30,
+                min(1800, sub.timeout_seconds),
+            )
         # api_key: 空字符串视为不修改（避免前端表单提交时清空已保存的 key）
         if sub.api_key:
             existing["api_key"] = sub.api_key

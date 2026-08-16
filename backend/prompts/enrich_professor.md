@@ -3,7 +3,7 @@
 
 请返回一个 JSON 对象，包含以下字段（只填写你能从搜索结果中确认的信息，不确定的设为 null）：
 - name: 导师姓名。只有导师当前任职于中国大陆高校/科研院所时，才填写准确中文名；如果搜索结果只能确认英文名/拼音名，则设为 null，不要猜测。对于其他国家/地区（包括 US、UK、Singapore、Hong Kong、Macau、Taiwan 等）的导师，应填写学校主页、个人主页或 Google Scholar 上常用的英文名/romanized name，不要主动改成中文名
-- email: 邮箱地址。很多主页会用反爬格式展示邮箱，请读取并还原为可发送的真实邮箱，例如 `dongbin {at} math {dot} pku {dot} edu {dot} cn` 应填写为 `dongbin@math.pku.edu.cn`。常见写法包括 `{at}`、`[at]`、`(at)`、` at `、`{dot}`、`[dot]`、`(dot)`、` dot `；只有能从搜索结果支持完整地址时才填写
+- email: 邮箱地址。很多主页会用反爬格式展示邮箱，请读取并还原为可发送的真实邮箱，例如 `name {at} university {dot} edu` 应填写为 `name@university.edu`。常见写法包括 `{at}`、`[at]`、`(at)`、` at `、`{dot}`、`[dot]`、`(dot)`、` dot `；只有能从搜索结果支持完整地址时才填写
 - department: 院系
 - homepage: 个人主页 URL（学校官网或个人站点）
 - google_scholar: Google Scholar 个人主页 URL，形如 `https://scholar.google.com/citations?user=XXXX`。搜索结果中只要出现该链接就填上，没出现则设为 null

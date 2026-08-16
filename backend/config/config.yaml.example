@@ -6,16 +6,21 @@
 
 # LLM 配置
 llm:
-  # 可选: openai, deepseek, ollama
-  provider: "openai"
+  # 可选: codex, openai, deepseek, ollama
+  provider: "codex"
+  # Codex App Server 配置；复用宿主机 codex login，不需要 API Key
+  codex:
+    # 留空则使用 Codex 账号当前默认模型
+    model: ""
+    timeout_seconds: 600
   # OpenAI 配置
   openai:
-    api_key: "sk-your-openai-api-key"
+    api_key: "your-openai-api-key"
     model: "gpt-4o"
     base_url: "https://api.openai.com/v1"
   # DeepSeek 配置
   deepseek:
-    api_key: "sk-your-deepseek-api-key"
+    api_key: "your-deepseek-api-key"
     model: "deepseek-chat"
     base_url: "https://api.deepseek.com/v1"
   # Ollama 本地模型配置
@@ -25,8 +30,9 @@ llm:
 
 # 搜索配置
 search:
-  # 可选: codex（推荐，复用本机 Codex 登录）或 serper
-  provider: "codex"
+  # auto 跟随全局 LLM：Codex 使用专用 harness，其他后端使用 Serper 工具链
+  # 也可显式设为 codex 或 serper；全局 LLM 为 Codex 时始终使用 Codex harness
+  provider: "auto"
   codex:
     # 单次 Codex 搜索超时；Worker 在宿主机运行，不读取此文件中的 API Key
     timeout_seconds: 900

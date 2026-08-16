@@ -30,8 +30,9 @@ docker compose build backend web
 
 Codex Worker 以当前 WSL 用户运行并复用 `~/.codex` 中的现有登录。Docker
 后端只挂载该临时 Socket 目录，不会挂载 Codex 登录目录，也不会获得 ChatGPT
-凭据。Codex thread 的工作目录是临时目录中的空目录，不是项目仓库；搜索只接收
-后端主动传入的 Profile 摘要和已存在导师索引。
+凭据。Codex thread 的工作目录是临时目录中的空目录，不是项目仓库；各任务只接收
+后端为当前任务主动传入的必要上下文。搜索、导师补全和代表作研究启用实时网页
+能力；邮件撰写和 Profile 生成使用无网页、无文件访问的独立 harness。
 
 项目位于 WSL 的 `/mnt/c` 时不能把 Socket 放在项目目录，因为 DrvFS 不支持
 Unix Socket。默认 `/tmp/taoci-codex-1000` 位于 WSL 原生 Linux 文件系统。

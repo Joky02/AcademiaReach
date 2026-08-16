@@ -43,8 +43,10 @@ async def _connect() -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
 
 async def stream_codex_task(
     prompt: str,
-    output_schema: dict[str, Any],
+    output_schema: dict[str, Any] | None = None,
     timeout_seconds: int = 900,
+    harness: str = "general",
+    model: str | None = None,
 ) -> AsyncGenerator[dict[str, Any], None]:
     request_id = uuid.uuid4().hex
     reader, writer = await _connect()
@@ -53,6 +55,8 @@ async def stream_codex_task(
         "action": "run",
         "prompt": prompt,
         "output_schema": output_schema,
+        "harness": harness,
+        "model": model,
     }
     writer.write((json.dumps(request, ensure_ascii=False) + "\n").encode("utf-8"))
     await writer.drain()
@@ -80,7 +84,7 @@ async def stream_codex_task(
                     )
     except TimeoutError as exc:
         raise CodexWorkerError(
-            f"Codex 搜索超过 {timeout_seconds} 秒，任务已停止"
+            f"Codex 任务超过 {timeout_seconds} 秒，已停止"
         ) from exc
     finally:
         writer.close()
@@ -88,6 +92,31 @@ async def stream_codex_task(
             await writer.wait_closed()
         except (ConnectionError, BrokenPipeError):
             pass
+
+
+async def run_codex_text(
+    prompt: str,
+    *,
+    timeout_seconds: int = 600,
+    harness: str = "general",
+    model: str | None = None,
+    output_schema: dict[str, Any] | None = None,
+) -> str:
+    async for message in stream_codex_task(
+        prompt=prompt,
+        output_schema=output_schema,
+        timeout_seconds=timeout_seconds,
+        harness=harness,
+        model=model,
+    ):
+        if message.get("type") == "result":
+            content = message.get("content")
+            if isinstance(content, str):
+                return content
+            data = message.get("data")
+            if isinstance(data, dict) and isinstance(data.get("content"), str):
+                return data["content"]
+    raise CodexWorkerError("Codex Worker 未返回文本结果")
 
 
 async def get_codex_worker_status() -> dict[str, Any]:

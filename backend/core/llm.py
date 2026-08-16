@@ -1,4 +1,4 @@
-"""LLM 统一接口 — 支持 OpenAI / DeepSeek / Ollama 多后端切换"""
+"""LLM 统一接口 — 支持 Codex / OpenAI / DeepSeek / Ollama 多后端切换"""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import yaml
 from langchain_openai import ChatOpenAI
 from langchain_community.chat_models import ChatOllama
 from langchain_core.language_models import BaseChatModel
+from backend.core.codex_llm import CodexChatModel
 
 CONFIG_PATH = Path(__file__).parent.parent / "config" / "config.yaml"
 
@@ -28,7 +29,16 @@ def get_llm(provider: Optional[str] = None) -> BaseChatModel:
     llm_cfg = cfg.get("llm", {})
     provider = provider or llm_cfg.get("provider", "openai")
 
-    if provider == "openai":
+    if provider == "codex":
+        sub = llm_cfg.get("codex", {}) or {}
+        return CodexChatModel(
+            model_name=str(sub.get("model", "") or ""),
+            timeout_seconds=max(
+                30,
+                min(1800, int(sub.get("timeout_seconds", 600))),
+            ),
+        )
+    elif provider == "openai":
         sub = llm_cfg.get("openai", {})
         return ChatOpenAI(
             model=sub.get("model", "gpt-4o"),

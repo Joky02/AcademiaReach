@@ -11,6 +11,7 @@ from typing import AsyncGenerator, Optional
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from backend.core.llm import get_llm, load_profile, load_yaml_config
+from backend.core.codex_llm import codex_invoke_options, is_codex_llm
 from backend.core.prompts import load_email_template, load_prompt
 from backend.core.serper import SerperAPIError, search_serper
 from backend.core import database as db
@@ -47,6 +48,66 @@ def _get_compose_prompt(lang: str) -> str:
     return base
 
 
+def _research_output_schema() -> dict:
+    nullable_string = {"anyOf": [{"type": "string"}, {"type": "null"}]}
+    return {
+        "type": "object",
+        "properties": {
+            "representative_papers": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string"},
+                        "venue": {"type": "string"},
+                        "year": {"type": "string"},
+                        "citation_count": {
+                            "anyOf": [{"type": "integer"}, {"type": "null"}]
+                        },
+                        "summary": {"type": "string"},
+                    },
+                    "required": [
+                        "title",
+                        "venue",
+                        "year",
+                        "citation_count",
+                        "summary",
+                    ],
+                    "additionalProperties": False,
+                },
+            },
+            "research_themes": {"type": "array", "items": {"type": "string"}},
+            "recent_focus": nullable_string,
+            "lab_info": nullable_string,
+        },
+        "required": [
+            "representative_papers",
+            "research_themes",
+            "recent_focus",
+            "lab_info",
+        ],
+        "additionalProperties": False,
+    }
+
+
+def _compose_output_schema(lang: str) -> dict:
+    fields = (
+        ["subject", "body"]
+        if lang == "cn"
+        else [
+            "salutation",
+            "representative_work_paragraph",
+            "research_fit_paragraph",
+        ]
+    )
+    return {
+        "type": "object",
+        "properties": {field: {"type": "string"} for field in fields},
+        "required": fields,
+        "additionalProperties": False,
+    }
+
+
 # ── Serper 搜索 ──────────────────────────────────────
 
 async def _search_serper(query: str, api_key: str, num: int = 10) -> list[dict]:
@@ -63,49 +124,67 @@ async def _deep_research_professor(prof: dict, llm, serper_key: str) -> str:
     university = prof["university"]
     research = prof.get("research_summary", "") or ""
 
-    # 构造搜索查询
-    queries = [
-        f'"{name}" {university} publications papers',
-        f'"{name}" {university} Google Scholar citations',
-        f'"{name}" "{university}" "Cited by"',
-        f'"{name}" {research.split(",")[0].strip() if research else ""} paper',
-    ]
-
-    all_results = []
-    for q in queries:
-        try:
-            results = await _search_serper(q, serper_key, num=8)
-            all_results.extend(results)
-        except SerperAPIError as e:
-            logger.warning("Serper unavailable during deep research for %s: %s", name, e)
-            return f"（代表作检索暂不可用：{e}）"
-        except Exception as e:
-            logger.warning(f"Deep research 搜索失败 ({q}): {e}")
-        await asyncio.sleep(0.3)
-
-    if not all_results:
-        return "（未搜索到该导师的详细论文信息）"
-
-    # 去重
-    seen = set()
     unique = []
-    for r in all_results:
-        link = r.get("link", "")
-        if link and link not in seen:
-            seen.add(link)
-            unique.append(r)
+    if is_codex_llm(llm):
+        research_input = (
+            f"导师: {name}\n学校: {university}\n研究方向: {research}\n\n"
+            "请使用实时网页搜索核验这位导师的代表作、明确引用数、研究主题、"
+            "近两年研究重点和实验室信息。优先使用学校主页、个人主页、"
+            "Google Scholar 和正式论文页面。"
+        )
+    else:
+        queries = [
+            f'"{name}" {university} publications papers',
+            f'"{name}" {university} Google Scholar citations',
+            f'"{name}" "{university}" "Cited by"',
+            f'"{name}" {research.split(",")[0].strip() if research else ""} paper',
+        ]
 
-    search_text = "\n\n".join(
-        f"Title: {r.get('title', '')}\nSnippet: {r.get('snippet', '')}\nLink: {r.get('link', '')}"
-        for r in unique[:15]
-    )
+        all_results = []
+        for q in queries:
+            try:
+                results = await _search_serper(q, serper_key, num=8)
+                all_results.extend(results)
+            except SerperAPIError as e:
+                logger.warning(
+                    "Serper unavailable during deep research for %s: %s",
+                    name,
+                    e,
+                )
+                return f"（代表作检索暂不可用：{e}）"
+            except Exception as e:
+                logger.warning(f"Deep research 搜索失败 ({q}): {e}")
+            await asyncio.sleep(0.3)
+
+        if not all_results:
+            return "（未搜索到该导师的详细论文信息）"
+
+        seen = set()
+        for result in all_results:
+            link = result.get("link", "")
+            if link and link not in seen:
+                seen.add(link)
+                unique.append(result)
+
+        search_text = "\n\n".join(
+            f"Title: {r.get('title', '')}\nSnippet: {r.get('snippet', '')}\nLink: {r.get('link', '')}"
+            for r in unique[:15]
+        )
+        research_input = (
+            f"导师: {name}\n学校: {university}\n研究方向: {research}\n\n"
+            f"搜索结果:\n{search_text}"
+        )
 
     # LLM 分析论文
     try:
         resp = await llm.ainvoke([
             SystemMessage(content=load_prompt("research_analyze")),
-            HumanMessage(content=f"导师: {name}\n学校: {university}\n研究方向: {research}\n\n搜索结果:\n{search_text}"),
-        ])
+            HumanMessage(content=research_input),
+        ], **codex_invoke_options(
+            llm,
+            "research",
+            _research_output_schema(),
+        ))
         content = resp.content.strip()
         if content.startswith("```"):
             content = content.split("\n", 1)[1]
@@ -113,7 +192,12 @@ async def _deep_research_professor(prof: dict, llm, serper_key: str) -> str:
         research_data = json.loads(content)
     except Exception as e:
         logger.warning(f"Deep research LLM 分析失败 ({name}): {e}")
-        return f"搜索到 {len(unique)} 条相关结果，但分析失败。原始信息:\n{search_text[:2000]}"
+        if is_codex_llm(llm):
+            return f"（Codex Deep Research 分析失败：{e}）"
+        return (
+            f"搜索到 {len(unique)} 条相关结果，但分析失败。"
+            f"原始信息:\n{search_text[:2000]}"
+        )
 
     # 格式化为文本
     lines = []
@@ -129,7 +213,7 @@ async def _deep_research_professor(prof: dict, llm, serper_key: str) -> str:
                     return int(match.group(0).replace(",", ""))
             return -1
 
-        papers = sorted(papers, key=_citation_count, reverse=True)
+        papers = sorted(papers, key=_citation_count, reverse=True)[:5]
         lines.append("### Representative Papers")
         for p in papers:
             title = p.get("title", "Unknown")
@@ -340,8 +424,10 @@ async def compose_emails(
             "message": f"🔍 Deep Research ({i+1}/{len(professors)}): {prof['name']} @ {prof['university']}",
         }
 
-        research_result = "（Serper API Key 未配置，跳过论文搜索）"
-        if serper_key and serper_key != "your-serper-api-key":
+        research_result = "（搜索后端未配置，跳过论文搜索）"
+        if is_codex_llm(llm) or (
+            serper_key and serper_key != "your-serper-api-key"
+        ):
             try:
                 research_result = await _deep_research_professor(prof, llm, serper_key)
             except Exception as e:
@@ -413,7 +499,11 @@ Key requirements:
             response = await llm.ainvoke([
                 SystemMessage(content=system_prompt),
                 HumanMessage(content=user_msg),
-            ])
+            ], **codex_invoke_options(
+                llm,
+                "compose",
+                _compose_output_schema(lang),
+            ))
 
             content = response.content.strip()
             if content.startswith("```"):

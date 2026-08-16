@@ -18,6 +18,7 @@ from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
 
 from backend.core.llm import get_llm, load_yaml_config, load_profile
+from backend.core.codex_llm import codex_invoke_options, is_codex_llm
 from backend.core.prompts import load_prompt
 from backend.core.serper import SerperAPIError, search_serper as request_serper
 from backend.core.codex_client import CodexWorkerError, stream_codex_task
@@ -568,10 +569,15 @@ async def _candidate_enrichment_search(
         known_info += f"\n研究方向线索: {research_hint}"
 
     try:
-        resp = await get_llm().ainvoke([
+        llm = get_llm()
+        resp = await llm.ainvoke([
             SystemMessage(content=load_prompt("enrich_professor")),
             HumanMessage(content=f"已知信息:\n{known_info}\n\n搜索结果:\n{search_text}\n\n请补全这位导师的信息。"),
-        ])
+        ], **codex_invoke_options(
+            llm,
+            "enrich",
+            _enrich_output_schema(),
+        ))
         enriched = _parse_json_response(resp.content)
     except Exception as e:
         logger.warning(f"Candidate enrichment LLM failed for {name} @ {university}: {e}")
@@ -844,6 +850,36 @@ def _parse_json_response(content: str) -> any:
     return json.loads(content)
 
 
+def _enrich_output_schema() -> dict[str, Any]:
+    nullable_string = {"anyOf": [{"type": "string"}, {"type": "null"}]}
+    return {
+        "type": "object",
+        "properties": {
+            "name": nullable_string,
+            "email": nullable_string,
+            "department": nullable_string,
+            "homepage": nullable_string,
+            "google_scholar": nullable_string,
+            "research_summary": nullable_string,
+            "recent_papers": nullable_string,
+            "region": nullable_string,
+            "tags": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": [
+            "name",
+            "email",
+            "department",
+            "homepage",
+            "google_scholar",
+            "research_summary",
+            "recent_papers",
+            "region",
+            "tags",
+        ],
+        "additionalProperties": False,
+    }
+
+
 # ── 单个导师信息补全 ──────────────────────────────────
 
 
@@ -865,63 +901,19 @@ async def enrich_professor(
     cfg = load_yaml_config()
     search_cfg = cfg.get("search", {})
     serper_key = search_cfg.get("serper_api_key", "")
-    if not serper_key or serper_key == "your-serper-api-key":
+    llm = get_llm()
+    codex_mode = is_codex_llm(llm)
+    if (
+        not codex_mode
+        and (not serper_key or serper_key == "your-serper-api-key")
+    ):
         return {"success": False, "message": "请先配置 Serper API Key"}
 
-    llm = get_llm()
     name = prof["name"]
     university = prof["university"]
     department = prof.get("department") or ""
     region = prof.get("region") or ""
     await emit(f"准备补全：{name} @ {university}")
-
-    # 构造搜索查询
-    queries = [
-        f"{name} {university} professor homepage",
-        f"{name} {university} {department} research email",
-        f'"{name}" "{university}" google scholar',
-    ]
-    if _is_mainland_china(region, university):
-        queries = [
-            f'"{name}" "{university}" 中文名 教授',
-            f'"{name}" "{university}" 个人主页 教授',
-            f'"{name}" "{university}" 简历 学者',
-            *queries,
-        ]
-
-    all_results = []
-    for q in queries:
-        await emit(f"搜索：{q}")
-        try:
-            results = await search_serper(q, serper_key, num=8)
-            all_results.extend(results)
-        except SerperAPIError as e:
-            logger.warning("Serper unavailable while enriching %s: %s", name, e)
-            await emit(str(e))
-            return {"success": False, "message": str(e)}
-        except Exception as e:
-            logger.warning(f"Enrich search failed for '{q}': {e}")
-            await emit(f"搜索失败：{q} ({e})")
-        await asyncio.sleep(0.3)
-
-    if not all_results:
-        await emit("未搜索到任何结果")
-        return {"success": False, "message": "未搜索到任何结果"}
-
-    # 去重
-    seen = set()
-    unique = []
-    for r in all_results:
-        link = r.get("link", "")
-        if link and link not in seen:
-            seen.add(link)
-            unique.append(r)
-
-    search_text = "\n\n".join(
-        f"Title: {r.get('title', '')}\nSnippet: {r.get('snippet', '')}\nLink: {r.get('link', '')}"
-        for r in unique[:15]
-    )
-    await emit(f"搜索完成：去重后 {len(unique)} 条结果，开始提取字段")
 
     known_info = f"姓名: {name}\n学校: {university}"
     if department:
@@ -934,10 +926,84 @@ async def enrich_professor(
         known_info += f"\nGoogle Scholar: {prof['google_scholar']}"
 
     try:
+        if codex_mode:
+            await emit("Codex 正在实时搜索并核验公开学术信息")
+            user_content = (
+                f"已知信息:\n{known_info}\n\n"
+                "请使用实时网页搜索补全这位导师的信息。优先核验学校官网、"
+                "个人主页和 Google Scholar，并遵守中国大陆中文名规则。"
+            )
+        else:
+            queries = [
+                f"{name} {university} professor homepage",
+                f"{name} {university} {department} research email",
+                f'"{name}" "{university}" google scholar',
+            ]
+            if _is_mainland_china(region, university):
+                queries = [
+                    f'"{name}" "{university}" 中文名 教授',
+                    f'"{name}" "{university}" 个人主页 教授',
+                    f'"{name}" "{university}" 简历 学者',
+                    *queries,
+                ]
+
+            all_results = []
+            for query in queries:
+                await emit(f"搜索：{query}")
+                try:
+                    all_results.extend(
+                        await search_serper(query, serper_key, num=8)
+                    )
+                except SerperAPIError as exc:
+                    logger.warning(
+                        "Serper unavailable while enriching %s: %s",
+                        name,
+                        exc,
+                    )
+                    await emit(str(exc))
+                    return {"success": False, "message": str(exc)}
+                except Exception as exc:
+                    logger.warning(
+                        "Enrich search failed for '%s': %s",
+                        query,
+                        exc,
+                    )
+                    await emit(f"搜索失败：{query} ({exc})")
+                await asyncio.sleep(0.3)
+
+            if not all_results:
+                await emit("未搜索到任何结果")
+                return {"success": False, "message": "未搜索到任何结果"}
+
+            seen = set()
+            unique = []
+            for result in all_results:
+                link = result.get("link", "")
+                if link and link not in seen:
+                    seen.add(link)
+                    unique.append(result)
+            search_text = "\n\n".join(
+                f"Title: {item.get('title', '')}\n"
+                f"Snippet: {item.get('snippet', '')}\n"
+                f"Link: {item.get('link', '')}"
+                for item in unique[:15]
+            )
+            await emit(
+                f"搜索完成：去重后 {len(unique)} 条结果，开始提取字段"
+            )
+            user_content = (
+                f"已知信息:\n{known_info}\n\n搜索结果:\n{search_text}\n\n"
+                "请补全这位导师的信息。"
+            )
+
         resp = await llm.ainvoke([
             SystemMessage(content=load_prompt("enrich_professor")),
-            HumanMessage(content=f"已知信息:\n{known_info}\n\n搜索结果:\n{search_text}\n\n请补全这位导师的信息。"),
-        ])
+            HumanMessage(content=user_content),
+        ], **codex_invoke_options(
+            llm,
+            "enrich",
+            _enrich_output_schema(),
+        ))
         enriched = _parse_json_response(resp.content)
     except Exception as e:
         logger.error(f"Enrich LLM failed: {e}")
@@ -1294,6 +1360,7 @@ async def _search_professors_codex(
     cfg = load_yaml_config()
     search_cfg = cfg.get("search", {}) or {}
     codex_cfg = search_cfg.get("codex", {}) or {}
+    llm_codex_cfg = (cfg.get("llm", {}) or {}).get("codex", {}) or {}
     resolved_keywords = keywords or search_cfg.get("keywords", []) or []
     resolved_regions = regions or search_cfg.get("regions", []) or []
     max_results = max(1, min(int(max_results or 20), 40))
@@ -1310,6 +1377,8 @@ async def _search_professors_codex(
         prompt=prompt,
         output_schema=_codex_search_output_schema(),
         timeout_seconds=timeout_seconds,
+        harness="search",
+        model=str(llm_codex_cfg.get("model") or "").strip() or None,
     ):
         if message.get("type") == "progress":
             yield {"type": "progress", "message": message.get("message", "")}
@@ -1358,7 +1427,16 @@ async def search_professors(
     """Dispatch professor discovery to the configured search provider."""
     cfg = load_yaml_config()
     search_cfg = cfg.get("search", {}) or {}
-    provider = str(search_cfg.get("provider", "serper")).strip().lower()
+    provider = str(search_cfg.get("provider", "auto")).strip().lower()
+    llm_provider = str(
+        (cfg.get("llm", {}) or {}).get("provider", "openai")
+    ).strip().lower()
+    if llm_provider == "codex":
+        # Codex owns web tooling inside its App Server harness. Never route it
+        # through the legacy LangChain bind_tools path, even with stale config.
+        provider = "codex"
+    elif provider == "auto":
+        provider = "codex" if llm_provider == "codex" else "serper"
 
     if provider == "codex":
         try:
