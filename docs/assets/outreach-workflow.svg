@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="330" viewBox="0 0 1400 330" role="img" aria-labelledby="title desc">
+  <title id="title">AcademiaReach outreach workflow</title>
+  <desc id="desc">A six-stage workflow from professor discovery to reply tracking.</desc>
+  <rect width="1400" height="330" fill="#111318"/>
+  <text x="70" y="72" fill="#f8fafc" font-family="Inter,Segoe UI,sans-serif" font-size="30" font-weight="700">One research workflow, end to end</text>
+  <text x="70" y="105" fill="#94a3b8" font-family="Inter,Segoe UI,sans-serif" font-size="16">Every professor stays reviewable, source-backed, and under your control.</text>
+
+  <path d="M145 202H1255" fill="none" stroke="#334155" stroke-width="4"/>
+  <path d="M1242 190L1260 202L1242 214" fill="none" stroke="#334155" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <g font-family="Inter,Segoe UI,sans-serif">
+    <g transform="translate(145 202)">
+      <circle r="34" fill="#16252a" stroke="#22d3ee" stroke-width="3"/>
+      <circle cx="-8" cy="-6" r="8" fill="none" stroke="#22d3ee" stroke-width="3"/>
+      <path d="M5 7L18 20M-23 18C-18 7-6 4 3 9" fill="none" stroke="#22d3ee" stroke-width="3" stroke-linecap="round"/>
+      <text x="0" y="66" fill="#f8fafc" font-size="17" font-weight="700" text-anchor="middle">Discover</text>
+      <text x="0" y="89" fill="#94a3b8" font-size="13" text-anchor="middle">new professors</text>
+    </g>
+
+    <g transform="translate(367 202)">
+      <circle r="34" fill="#272317" stroke="#fbbf24" stroke-width="3"/>
+      <path d="M-17-3L-4 10L18-15M-18 20H18" fill="none" stroke="#fbbf24" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="0" y="66" fill="#f8fafc" font-size="17" font-weight="700" text-anchor="middle">Verify</text>
+      <text x="0" y="89" fill="#94a3b8" font-size="13" text-anchor="middle">identity and sources</text>
+    </g>
+
+    <g transform="translate(589 202)">
+      <circle r="34" fill="#251b20" stroke="#fb7185" stroke-width="3"/>
+      <path d="M-18-17H8L18-7V19H-18ZM8-17V-7H18M-10-4H9M-10 5H9M-10 14H3" fill="none" stroke="#fb7185" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="0" y="66" fill="#f8fafc" font-size="17" font-weight="700" text-anchor="middle">Recommend</text>
+      <text x="0" y="89" fill="#94a3b8" font-size="13" text-anchor="middle">relevant papers</text>
+    </g>
+
+    <g transform="translate(811 202)">
+      <circle r="34" fill="#172623" stroke="#34d399" stroke-width="3"/>
+      <path d="M-21-13H21V15H-21ZM-21-13L0 3L21-13" fill="none" stroke="#34d399" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="0" y="66" fill="#f8fafc" font-size="17" font-weight="700" text-anchor="middle">Compose</text>
+      <text x="0" y="89" fill="#94a3b8" font-size="13" text-anchor="middle">source-grounded drafts</text>
+    </g>
+
+    <g transform="translate(1033 202)">
+      <circle r="34" fill="#1d2230" stroke="#a78bfa" stroke-width="3"/>
+      <path d="M-16 0L-5 11L18-14M-20 22H20" fill="none" stroke="#a78bfa" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="0" y="66" fill="#f8fafc" font-size="17" font-weight="700" text-anchor="middle">Review</text>
+      <text x="0" y="89" fill="#94a3b8" font-size="13" text-anchor="middle">edit and send</text>
+    </g>
+
+    <g transform="translate(1255 202)">
+      <circle r="34" fill="#16232c" stroke="#38bdf8" stroke-width="3"/>
+      <path d="M-21-13H21V13H3L-8 23V13H-21ZM-12-3H12M-12 5H5" fill="none" stroke="#38bdf8" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="0" y="66" fill="#f8fafc" font-size="17" font-weight="700" text-anchor="middle">Track</text>
+      <text x="0" y="89" fill="#94a3b8" font-size="13" text-anchor="middle">replies and status</text>
+    </g>
+  </g>
+</svg>

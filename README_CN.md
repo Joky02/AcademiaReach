@@ -1,327 +1,280 @@
-[English](./README.md) | **中文**
+<p align="center">
+  <img src="docs/assets/academiareach-banner.png" alt="AcademiaReach 导师研究与套磁工作流" width="100%" />
+</p>
 
-# 🎓 AcademiaReach — PhD 自动套磁系统
+<h1 align="center">AcademiaReach</h1>
 
-> 全自动查找导师 → 生成个性化套磁邮件 → 发送 → 跟踪回复，配备 Web UI 实时监控。
+<p align="center">
+  从导师发现、代表作研究、邮件撰写到回复跟踪，一套强调证据、人工审核与隐私边界的博士套磁工作台。
+</p>
 
-![Python](https://img.shields.io/badge/Python-3.11-blue) ![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-green) ![React](https://img.shields.io/badge/React-18-61dafb) ![License](https://img.shields.io/badge/License-MIT-yellow)
+<p align="center">
+  <a href="README.md">English</a> ·
+  <a href="#快速开始">快速开始</a> ·
+  <a href="#agent-后端">Agent 后端</a> ·
+  <a href="docs/cloudflare-tunnel.zh-CN.md">私有部署</a>
+</p>
 
----
+<p align="center">
+  <img src="https://img.shields.io/badge/Python-3.11-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.11" />
+  <img src="https://img.shields.io/badge/FastAPI-Agent_Core-009688?style=flat-square&logo=fastapi&logoColor=white" alt="FastAPI" />
+  <img src="https://img.shields.io/badge/React-18-149ECA?style=flat-square&logo=react&logoColor=white" alt="React 18" />
+  <img src="https://img.shields.io/badge/Codex-App_Server-111111?style=flat-square&logo=openai&logoColor=white" alt="Codex App Server" />
+  <img src="https://img.shields.io/badge/Pi-SDK_Harness-F43F5E?style=flat-square" alt="Pi SDK Harness" />
+  <img src="https://img.shields.io/badge/Docker-Ready-2496ED?style=flat-square&logo=docker&logoColor=white" alt="Docker ready" />
+  <img src="https://img.shields.io/badge/License-MIT-FBBF24?style=flat-square" alt="MIT License" />
+</p>
 
-## 📑 目录
+## 这是什么
 
-- [功能概览](#功能概览)
-- [技术栈](#技术栈)
-- [项目结构](#项目结构)
-- [快速开始](#快速开始)
-- [配置说明](#配置说明)
-- [使用指南](#使用指南)
-- [API 参考](#api-参考)
+AcademiaReach 把博士套磁中分散的工作整理成一个可追踪流程：从公开来源发现新导师，核验姓名与联系方式，结合申请者 Profile 推荐代表作，生成有证据支撑的草稿，并在人工确认后发送和跟踪回复。
 
----
+它定位为个人研究工作台，而不是无人监管的群发工具。导师来源、推荐论文和邮件内容都可以检查；草稿可以编辑；发送必须显式确认；真实 Profile、凭据与附件不会进入 Git。
 
-## 功能概览
+| 能力 | 当前实现 |
+|---|---|
+| 导师发现 | Agent 分批并发搜索、CSRankings 候选、地区与方向筛选、持久化“新”标签 |
+| 数据质量 | 核验主页、邮箱与 Google Scholar；还原反爬邮箱；仅中国大陆导师使用准确中文名；自动合并重复记录 |
+| 研究辅助 | 导师研究摘要、代表作、按相关性与被引证据推荐论文、结合申请背景生成阅读理由 |
+| 邮件工作流 | 中英文模板、围绕代表作的克制讨论、可编辑草稿、按语言命名附件、SMTP 发送 |
+| 回复管理 | IMAP 轮询、邮件对话、草稿和已发送视图、导师级任务状态、WebSocket 实时进度 |
+| 部署运行 | Direct、Pi、Codex 三种执行路径，并发 Worker、Docker、可选 Cloudflare Access 保护 |
 
-| 模块 | 功能 |
-|------|------|
-| **全局 Agent 后端** | 独立选择 Direct API、Pi Harness 或 Codex App Server；Pi 可将任务 Harness 接到现有 OpenAI 兼容、DeepSeek 或 Ollama API |
-| **导师搜索** | Codex/Pi 结合实时网页搜索，从学校主页、Google Scholar 和 CSRankings 中发现新导师 |
-| **Deep Research** | Codex/Pi 使用任务专属 research harness 完成导师研究和论文推荐 |
-| **个性化论文推荐** | 导师补全会结合申请者 Profile 推荐可核验的相关代表作，保存被引证据、阅读理由和来源链接，并在写信时复用 |
-| **邮件撰写** | 根据导师研究方向 + 用户 Profile，LLM 生成个性化套磁邮件（中/英文自动切换） |
-| **邮件发送** | 草稿人工审核 → 编辑 → 确认发送（SMTP），支持附带中/英文 PDF 简历 |
-| **回复跟踪** | IMAP 轮询收件箱，双策略匹配导师回复（FROM 匹配 + 主题匹配），自动更新状态 |
-| **Agent 自定义** | 搜索偏好、邮件风格、额外要求均可通过前端 UI 自定义，注入到 Agent System Prompt |
-| **邮箱验证** | 前端一键验证 SMTP / IMAP 凭据并保存到配置 |
-| **Web UI** | Dashboard / 导师管理 / 草稿审核 / 发送状态 / 回复跟踪 / 设置 |
-| **实时进度** | WebSocket 推送搜索和邮件生成进度到前端 |
+## 工作流
 
----
+<p align="center">
+  <img src="docs/assets/outreach-workflow.svg" alt="从导师发现、核验、论文推荐、写信、审核到回复跟踪的完整工作流" width="100%" />
+</p>
 
-## 技术栈
+1. **发现**：按研究方向和地区拆分任务，优先寻找数据库外的新导师。
+2. **核验**：保存前确认姓名、学校主页、邮箱和 Scholar 信息。
+3. **补全**：生成研究摘要，并结合申请者 Profile 推荐值得阅读的代表作。
+4. **写信**：中文遵循明确 Prompt 约束，英文使用固定私有模板，并复用已核验信息。
+5. **审核**：发送前检查主题、正文和附件，随时修改或删除草稿。
+6. **跟踪**：统一查看发送状态、回复和导师维度的邮件对话。
 
-**后端**
-- Python 3.11, FastAPI, Uvicorn
-- 官方 Codex Python SDK + 宿主机 App Server Worker
-- 官方 Pi TypeScript SDK + 隔离 Bun Worker
-- 独立的 Harness 引擎与 OpenAI / DeepSeek / Ollama 模型 API 选择
-- SQLite (aiosqlite), Pydantic v2
-- SMTP 发送, IMAP 收件, WebSocket
+## Agent 后端
 
-**前端**
-- React 18, TypeScript, Vite
-- TailwindCSS, Lucide Icons
-- Axios, React Router
+<p align="center">
+  <img src="docs/assets/agent-backends.svg" alt="Direct API、Pi Harness 与 Codex App Server 架构" width="100%" />
+</p>
 
----
+设置页将“任务 Harness”和“底层模型 API”分开选择。
 
-## 项目结构
+| 后端 | 凭据 | 网页研究 | 适合场景 |
+|---|---|---|---|
+| `direct` | OpenAI 兼容或 DeepSeek Key，也可以使用本地 Ollama | 不提供 Agent 网页工具 | Profile 生成和普通模型调用 |
+| `pi` | 复用所选 OpenAI 兼容、DeepSeek 或 Ollama 配置 | 在任务 Harness 内使用只读搜索工具 | 基于 API 的搜索、补全、论文推荐与写信 |
+| `codex` | 复用宿主机 `codex login` 会话 | 使用 Codex 实时网页研究 | 不在应用内填写模型 API Key 的完整 Agent 工作流 |
 
-```
-AcademiaReach/
-├── backend/
-│   ├── config/
-│   │   ├── config.yaml.example  # 公开配置模板（复制到被忽略的 config.yaml）
-│   │   └── my_profile.example.md # 公开 Profile 模板（复制到被忽略的 my_profile.md）
-│   ├── core/
-│   │   ├── models.py            # Pydantic 数据模型
-│   │   ├── database.py          # SQLite 异步 CRUD
-│   │   └── llm.py               # LLM 统一接口（多后端切换）
-│   ├── agents/
-│   │   ├── search_agent.py      # 导师搜索 Agent（Harness 网页搜索 + CSRankings + 信息提取）
-│   │   └── compose_agent.py     # 邮件撰写 Agent（中英文 Prompt + 自定义风格注入）
-│   ├── services/
-│   │   ├── send_service.py      # SMTP 邮件发送 + 简历附件
-│   │   └── reply_tracker.py     # IMAP 回复跟踪（FROM + SUBJECT 双策略匹配）
-│   ├── api/
-│   │   ├── routes.py            # REST API + WebSocket 路由
-│   │   └── websocket.py         # WebSocket 连接管理
-│   ├── main.py                  # FastAPI 入口 + 启动回复轮询
-│   └── requirements.txt
-├── frontend/
-│   ├── src/
-│   │   ├── pages/
-│   │   │   ├── Dashboard.tsx    # 系统概览 + 实时日志
-│   │   │   ├── Professors.tsx   # 导师管理（搜索 / 手动添加 / 详情）
-│   │   │   ├── Drafts.tsx       # 邮件草稿审核 / 编辑
-│   │   │   ├── Sent.tsx         # 已发送邮件列表
-│   │   │   ├── Replies.tsx      # 导师回复跟踪
-│   │   │   └── Settings.tsx     # 设置（Profile / 关键词 / Agent自定义 / 简历 / 邮箱验证）
-│   │   ├── components/
-│   │   │   ├── GlobalTaskIndicator.tsx  # 全局搜索/生成任务状态栏
-│   │   │   ├── ProfessorDetail.tsx      # 导师详情抽屉
-│   │   │   └── SearchModal.tsx          # 搜索配置弹窗
-│   │   ├── services/api.ts     # Axios API 封装 + WebSocket
-│   │   ├── App.tsx              # 路由 & 侧边栏布局
-│   │   └── main.tsx
-│   ├── package.json
-│   └── vite.config.ts
-├── codex_worker/                 # 宿主机 Codex SDK Worker（Unix Socket）
-├── deploy/codex-worker.sh        # Worker 安装与启停脚本
-├── pi_worker/                   # Pi SDK Worker（Bun + Unix Socket）
-├── deploy/pi-worker.sh          # Pi Worker 安装与启停脚本
-├── .gitignore
-└── README.md
-```
-
----
+导师搜索、自动补全和论文推荐需要选择 `pi` 或 `codex`。Worker 会为搜索、研究、写信与 Profile 生成加载不同 Harness，使用结构化输出，并在隔离的临时工作目录中运行。
 
 ## 快速开始
 
-### 1. 克隆项目
+### 环境要求
+
+- Python 3.11
+- Node.js 18 或更高版本
+- `npm`；Pi 安装脚本会在需要时准备固定版本的 Bun 运行时
+- 仅使用 `codex` 后端时需要 Codex CLI
+
+### 1. 安装
 
 ```bash
-git clone https://github.com/your-username/AcademiaReach.git
+git clone https://github.com/Joky02/AcademiaReach.git
 cd AcademiaReach
-```
 
-### 2. 后端环境
-
-```bash
 conda create -n academia python=3.11 -y
 conda activate academia
 pip install -r backend/requirements.txt
-```
 
-### 3. 前端环境
-
-```bash
 cd frontend
-npm install        # 需要 Node.js >= 18
+npm install
+cd ..
 ```
 
-### 4. 配置
+### 2. 创建私有配置
 
 ```bash
 cp backend/config/config.yaml.example backend/config/config.yaml
 cp backend/config/my_profile.example.md backend/config/my_profile.md
+
 mkdir -p backend/config/email_templates
-cp backend/templates/compose_en.example.md backend/config/email_templates/compose_en.md
-# 可选：如果要写自己的私有邮件 prompt，复制到被 git 忽略的本地覆盖目录
+cp backend/templates/compose_en.example.md \
+  backend/config/email_templates/compose_en.md
+```
+
+编辑 `backend/config/config.yaml` 和 `backend/config/my_profile.md`。复制出的文件都已被 Git 忽略，后续也可以在设置页维护模型、Profile、Prompt、附件和邮箱配置。
+
+需要私有 Prompt 覆盖时执行：
+
+```bash
 mkdir -p backend/config/prompts
 cp backend/prompts/compose_cn.md backend/config/prompts/compose_cn.md
 ```
 
-编辑 `backend/config/config.yaml`，填入：
-- **Agent 执行引擎** — `direct`、`pi` 或 `codex`；Pi 使用任务 Harness 但不要求订阅
-- **模型 API** — Pi/Direct 共用 OpenAI 兼容、DeepSeek 或 Ollama 配置
-- **搜索后端** — 导师搜索和补全需要选择 Codex 或 Pi Harness
-- **SMTP 凭据** — 发件邮箱（也可在前端设置页验证并保存）
-- **IMAP 凭据** — 收件邮箱，用于回复跟踪
+`backend/config/prompts/` 中的同名文件会覆盖 `backend/prompts/` 里的公开通用模板。
 
-编辑 `backend/config/my_profile.md`，用 Markdown 填写你的研究背景、发表论文、技能等。
+### 3. 启动 Agent 后端
 
-编辑 `backend/config/email_templates/compose_en.md`，填写英文邮件中固定的主题、开场、个人经历、结尾和落款。请保留三个 `{{ ... }}` 占位符，模型只负责导师称呼、代表作讨论段和研究匹配段。这个私有模板目录已被 Git 忽略。
-
-`backend/prompts/*.md` 是可提交的通用 example prompt。个人化的 prompt 覆盖只放在 `backend/config/prompts/*.md`；该目录已被 Git 忽略，并会优先于 example 加载。
-
-### 5. 启动
+使用 Pi 接入所选模型 API：
 
 ```bash
-# 首次配置 Codex
-codex login
-./deploy/codex-worker.sh install
-
-# 启动宿主机 Codex Worker
-./deploy/codex-worker.sh start
-
-# 首次安装并启动 Pi SDK Worker
 ./deploy/pi-worker.sh install
 ./deploy/pi-worker.sh start
+```
 
-# 终端 1：后端
+使用 Codex App Server：
+
+```bash
+codex login
+./deploy/codex-worker.sh install
+./deploy/codex-worker.sh start
+```
+
+在 `backend/config/config.yaml` 中把 `llm.agent_backend` 设为 `pi`、`codex` 或 `direct`，也可以启动后在设置页切换。
+
+### 4. 启动应用
+
+```bash
+# 终端 1
 conda activate academia
 TAOCI_CODEX_SOCKET=/tmp/taoci-codex-$(id -u)/worker.sock \
 TAOCI_PI_SOCKET=/tmp/taoci-pi-$(id -u)/worker.sock \
   uvicorn backend.main:app --reload --port 8000
 
-# 终端 2：前端
+# 终端 2
 cd frontend
 npm run dev
 ```
 
-访问 **http://localhost:5173** 打开 Web UI。
-
-### Docker 与 Cloudflare Tunnel
-
-需要使用 Docker 部署并通过自己的域名访问时，请参考 [Docker 与 Cloudflare Tunnel 部署指南](docs/cloudflare-tunnel.zh-CN.md)。指南包含 Cloudflare Access 登录保护、持久化目录和 WebSocket 验证步骤。
-
----
+浏览器打开 [http://localhost:5173](http://localhost:5173)，FastAPI 文档位于 [http://localhost:8000/docs](http://localhost:8000/docs)。
 
 ## 配置说明
 
-### config.yaml
+公开配置模板位于 [`backend/config/config.yaml.example`](backend/config/config.yaml.example)，核心模型配置如下：
 
 ```yaml
 llm:
-  agent_backend: pi               # direct / pi / codex
-  provider: deepseek               # openai / deepseek / ollama；供 direct/pi 使用
+  agent_backend: "codex"       # direct / pi / codex
+  provider: "openai"           # direct/pi 使用 openai / deepseek / ollama
   codex:
-    model: ""                       # 留空使用账号默认模型
+    model: ""                  # 留空则使用 Codex 账号默认模型
     timeout_seconds: 600
   pi:
     timeout_seconds: 600
   openai:
-    api_key: "sk-..."
+    api_key: "your-openai-api-key"
     model: "gpt-4o"
     base_url: "https://api.openai.com/v1"
-  deepseek:
-    api_key: "sk-..."
-    model: "deepseek-chat"
-    base_url: "https://api.deepseek.com/v1"
-  ollama:
-    model: "llama3"
-    base_url: "http://localhost:11434"
 
 search:
   agent:
-    timeout_seconds: 120             # 每个小批次的超时
-    batch_size: 3                    # 每批候选数，完成即保存
+    timeout_seconds: 120
+    batch_size: 3
     parallel_batches: 2
-  keywords:
-    - "machine learning"
-    - "natural language processing"
+  keywords: ["machine learning", "natural language processing"]
   regions: ["US", "UK", "China"]
   max_professors: 20
-
-smtp:
-  host: "smtp.gmail.com"
-  port: 587
-  username: "you@gmail.com"
-  password: "app-password"
-  use_tls: true
-
-imap:
-  host: "imap.gmail.com"
-  port: 993
-  username: "you@gmail.com"
-  password: "app-password"
-  use_ssl: true
-  poll_interval: 300              # 回复检查间隔（秒）
-
-# 可选：自定义 Agent 行为（也可在前端设置页编辑）
-prompts:
-  search_preference: ""           # 搜索偏好
-  compose_style_cn: ""            # 中文邮件风格
-  compose_style_en: ""            # 英文邮件风格
-  compose_extra_cn: ""            # 中文邮件额外要求
-  compose_extra_en: ""            # 英文邮件额外要求
 ```
 
-### my_profile.md
+| 本地路径 | 用途 | Git 是否跟踪 |
+|---|---|---|
+| `backend/config/config.yaml` | 模型、SMTP、IMAP 与搜索设置 | 否 |
+| `backend/config/my_profile.md` | 申请者研究背景 | 否 |
+| `backend/config/prompts/` | 私有 Prompt 覆盖 | 否 |
+| `backend/config/email_templates/` | 私有固定邮件模板 | 否 |
+| `backend/config/*.pdf` | 简历与成绩单 | 否 |
+| `backend/config/papers/` | 申请者论文 | 否 |
+| `backend/data/` 与 `*.db` | 运行数据库 | 否 |
 
-用 Markdown 写你的研究背景、发表论文、竞赛经历、目标方向等。系统会将此内容传给 LLM，用于匹配导师和生成个性化邮件。
+不要使用 `git add -f` 添加这些文件。公开改动前应检查 `git status`，并扫描暂存区中的凭据与个人信息。
 
-### 简历附件
+## 部署
 
-在前端设置页上传中/英文 PDF 简历，发送邮件时会自动根据导师地区附上对应语言的简历。
+Compose 包含 FastAPI 后端、Pi Worker、React/Nginx 前端，以及可选的 Cloudflare Tunnel Connector。受保护的部署配置不会向宿主机直接暴露端口。
 
----
+需要通过自己的域名和 Cloudflare Access 私有访问时，按照 [`docs/cloudflare-tunnel.zh-CN.md`](docs/cloudflare-tunnel.zh-CN.md) 配置：
 
-## 使用指南
+```bash
+cp .env.example .env
+cp deploy/cloudflare/config.yml.example deploy/cloudflare/config.yml
+docker compose --profile tunnel up -d --build
+```
 
-1. **Dashboard** — 查看导师总数、已发送、已回复等统计，以及实时搜索/生成日志
-2. **导师管理** — 点击"自动搜索"配置关键词和地区后，使用当前选择的后端搜索新导师，或手动添加导师；点击导师卡片查看详情
-3. **邮件草稿** — 点击"生成草稿"为所有未生成邮件的导师批量生成套磁邮件；可预览、编辑正文和主题、跳过不需要的
-4. **已发送** — 查看所有已发送邮件及发送时间
-5. **回复跟踪** — 系统每 5 分钟自动轮询 IMAP 收件箱（双策略：FROM 精确匹配 + SUBJECT 主题匹配），也可手动点击"检查回复"
-6. **设置** — 选择全局 LLM 后端，编辑 Profile / 搜索偏好，自定义 Agent 行为，上传附件并验证邮箱凭据
+Codex Worker 继续运行在宿主机，通过 Unix Socket 与容器通信；后端不会挂载 Codex 登录目录。WSL 环境应把 Worker Socket 放在 `/tmp`，不要放在 `/mnt/c` 下的项目目录中。
 
----
+## 项目结构
 
-## API 参考
+```text
+AcademiaReach/
+├── backend/
+│   ├── agents/          # 搜索、补全、论文推荐与邮件生成
+│   ├── api/             # REST 与 WebSocket 路由
+│   ├── config/          # 公开模板和被忽略的私有运行数据
+│   ├── core/            # 模型、数据库、后端客户端与 Prompt
+│   ├── prompts/         # 可提交的通用任务 Prompt
+│   └── services/        # SMTP 发送与 IMAP 回复跟踪
+├── codex_worker/        # Codex App Server 桥接 Worker
+├── pi_worker/           # Pi SDK Harness Worker
+├── frontend/            # React、TypeScript、Vite、TailwindCSS
+├── deploy/              # Worker 与 Cloudflare 部署脚本
+├── docs/                # 部署文档和 README 视觉资源
+└── docker-compose.yml
+```
 
-### 统计 & 导师
+## API
 
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| GET | `/api/stats` | 系统统计概览 |
-| GET | `/api/professors` | 导师列表 |
-| GET | `/api/professors/{id}` | 导师详情 |
-| POST | `/api/professors` | 手动添加导师 |
-| DELETE | `/api/professors/{id}` | 删除导师 |
-| POST | `/api/search/start` | 启动自动搜索 |
-| POST | `/api/search/stop` | 终止搜索 |
+完整 OpenAPI 文档位于 `/docs`，常用接口如下：
 
-### 邮件草稿 & 发送
+| 方法 | 路径 | 用途 |
+|---|---|---|
+| `GET` / `POST` | `/api/professors` | 查询或添加导师 |
+| `POST` | `/api/professors/dedupe` | 合并已有重复导师 |
+| `POST` | `/api/professors/{id}/enrich/start` | 启动后台自动补全 |
+| `POST` | `/api/search/start` | 启动分批导师搜索 |
+| `GET` | `/api/search/status` | 查询搜索任务状态 |
+| `GET` / `PUT` / `DELETE` | `/api/drafts/{id}` | 查看、编辑或删除草稿 |
+| `POST` | `/api/compose/start` | 在后台批量生成草稿 |
+| `POST` | `/api/send/{id}` | 发送已审核草稿 |
+| `POST` | `/api/replies/check` | 立即检查回复 |
+| `GET` | `/api/codex/status` | 检查 Codex Worker |
+| `GET` | `/api/pi/status` | 检查 Pi Worker |
+| `WS` | `/api/ws/progress` | 实时接收任务进度 |
 
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| GET | `/api/drafts` | 草稿列表（`?status=pending/sent`） |
-| GET | `/api/drafts/{id}` | 草稿详情 |
-| PUT | `/api/drafts/{id}` | 编辑草稿 |
-| POST | `/api/compose/start` | 批量生成邮件草稿 |
-| POST | `/api/send/{id}` | 发送单封邮件 |
-| POST | `/api/send/batch` | 批量发送 |
+## 开发与验证
 
-### 回复跟踪
+```bash
+# 后端测试
+python -m unittest discover -s backend/tests -v
 
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| GET | `/api/replies` | 回复列表 |
-| POST | `/api/replies/check` | 手动触发回复检查 |
-| PUT | `/api/replies/{id}/read` | 标记已读 |
+# Codex Worker 测试
+.run/codex-venv/bin/python -m unittest codex_worker.test_server -v
 
-### 配置管理
+# Pi 类型检查
+cd pi_worker && npm run check
 
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| GET | `/api/config/profile` | 获取 Profile |
-| PUT | `/api/config/profile` | 更新 Profile |
-| GET | `/api/config/settings` | 获取系统配置（脱敏） |
-| GET | `/api/codex/status` | 检查宿主机 Codex Worker |
-| GET | `/api/pi/status` | 检查 Pi SDK Worker |
-| PUT | `/api/config/keywords` | 更新搜索关键词 / 地区 |
-| GET | `/api/config/prompts` | 获取自定义 Prompt |
-| PUT | `/api/config/prompts` | 更新自定义 Prompt |
-| GET | `/api/config/cv` | 简历上传状态 |
-| POST | `/api/config/cv/{lang}` | 上传简历（`cn` / `en`） |
-| GET | `/api/config/email` | 获取邮箱配置（脱敏） |
-| POST | `/api/config/email/verify` | 验证 SMTP / IMAP 连接 |
-| WS | `/api/ws/progress` | WebSocket 实时进度推送 |
+# 前端生产构建
+cd frontend && npm run build
+```
 
----
+修改共享 Agent 行为时，请保持公开 Prompt 通用；申请者个人经历和固定文案只应写入被 Git 忽略的私有覆盖文件。
 
-## License
+## 常见问题
 
-MIT
+| 现象 | 检查方式 |
+|---|---|
+| 搜索或补全提示需要 Harness | 选择 `pi` 或 `codex`，再检查 `/api/pi/status` 或 `/api/codex/status` |
+| Codex 提示配置缺失或失效 | 执行 `./deploy/codex-worker.sh restart`，再查看 `./deploy/codex-worker.sh logs` |
+| Pi Worker 不可用 | 执行 `./deploy/pi-worker.sh restart`，再查看 `./deploy/pi-worker.sh logs` |
+| WSL 下找不到 Worker Socket | 把 `TAOCI_*_SOCKET_DIR` 放在 `/tmp`，不要放在 Windows 挂载目录 |
+| 邮件已发送但没有显示回复 | 在设置页验证 IMAP，并手动执行一次回复检查 |
+| Tunnel 正常但无法进入应用 | 检查 Cloudflare Access Policy、Team Name 和应用 AUD Tag |
+
+## 参与贡献
+
+欢迎提交 Issue 和范围清晰的 Pull Request。涉及共享逻辑的修改应补充测试；不要提交真实 Profile、邮箱凭据、API Key、附件、Tunnel 凭据或私有 Prompt。
+
+## 许可证
+
+[MIT](LICENSE)

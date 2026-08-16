@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="360" viewBox="0 0 1400 360" role="img" aria-labelledby="title desc">
+  <title id="title">AcademiaReach agent backend architecture</title>
+  <desc id="desc">The FastAPI backend routes tasks to Direct API, Pi Harness, or Codex App Server.</desc>
+  <rect width="1400" height="360" fill="#111318"/>
+  <text x="70" y="64" fill="#f8fafc" font-family="Inter,Segoe UI,sans-serif" font-size="30" font-weight="700">Bring the harness you want</text>
+  <text x="70" y="96" fill="#94a3b8" font-family="Inter,Segoe UI,sans-serif" font-size="16">One product surface, three execution paths, task-specific tools.</text>
+
+  <g font-family="Inter,Segoe UI,sans-serif">
+    <rect x="70" y="145" width="210" height="112" rx="8" fill="#172026" stroke="#38bdf8" stroke-width="2"/>
+    <text x="175" y="188" fill="#e0f2fe" font-size="20" font-weight="700" text-anchor="middle">React Web UI</text>
+    <text x="175" y="219" fill="#94a3b8" font-size="14" text-anchor="middle">reviewable workflows</text>
+
+    <path d="M280 201H385" stroke="#475569" stroke-width="3"/>
+    <path d="M372 190L389 201L372 212" fill="none" stroke="#475569" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+
+    <rect x="390" y="145" width="230" height="112" rx="8" fill="#202117" stroke="#fbbf24" stroke-width="2"/>
+    <text x="505" y="188" fill="#fef3c7" font-size="20" font-weight="700" text-anchor="middle">FastAPI Core</text>
+    <text x="505" y="219" fill="#94a3b8" font-size="14" text-anchor="middle">tasks, data, email, WS</text>
+
+    <path d="M620 201H722" stroke="#475569" stroke-width="3"/>
+    <path d="M709 190L726 201L709 212" fill="none" stroke="#475569" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+
+    <rect x="730" y="126" width="225" height="150" rx="8" fill="#211a20" stroke="#fb7185" stroke-width="2"/>
+    <text x="842" y="169" fill="#ffe4e6" font-size="20" font-weight="700" text-anchor="middle">AgentBackend</text>
+    <text x="842" y="201" fill="#94a3b8" font-size="14" text-anchor="middle">named task harnesses</text>
+    <text x="842" y="227" fill="#94a3b8" font-size="14" text-anchor="middle">structured responses</text>
+    <text x="842" y="253" fill="#94a3b8" font-size="14" text-anchor="middle">parallel workers</text>
+
+    <path d="M955 161H1033M955 201H1033M955 241H1033" stroke="#475569" stroke-width="2.5"/>
+
+    <rect x="1040" y="122" width="290" height="70" rx="8" fill="#16252a" stroke="#22d3ee" stroke-width="2"/>
+    <text x="1070" y="151" fill="#cffafe" font-size="17" font-weight="700">Direct API</text>
+    <text x="1070" y="176" fill="#94a3b8" font-size="13">OpenAI-compatible / DeepSeek / Ollama</text>
+
+    <rect x="1040" y="202" width="290" height="70" rx="8" fill="#172623" stroke="#34d399" stroke-width="2"/>
+    <text x="1070" y="231" fill="#d1fae5" font-size="17" font-weight="700">Pi Harness</text>
+    <text x="1070" y="256" fill="#94a3b8" font-size="13">SDK worker + selected model API</text>
+
+    <rect x="1040" y="282" width="290" height="70" rx="8" fill="#1d2230" stroke="#a78bfa" stroke-width="2"/>
+    <text x="1070" y="311" fill="#ede9fe" font-size="17" font-weight="700">Codex App Server</text>
+    <text x="1070" y="336" fill="#94a3b8" font-size="13">host login + live web research</text>
+  </g>
+</svg>
