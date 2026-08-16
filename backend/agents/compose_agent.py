@@ -8,11 +8,11 @@ import logging
 import re
 from typing import AsyncGenerator, Optional
 
-import httpx
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from backend.core.llm import get_llm, load_profile, load_yaml_config
 from backend.core.prompts import load_email_template, load_prompt
+from backend.core.serper import SerperAPIError, search_serper
 from backend.core import database as db
 
 logger = logging.getLogger(__name__)
@@ -51,15 +51,7 @@ def _get_compose_prompt(lang: str) -> str:
 
 async def _search_serper(query: str, api_key: str, num: int = 10) -> list[dict]:
     """调用 Serper API 进行 Google 搜索"""
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(
-            "https://google.serper.dev/search",
-            json={"q": query, "num": num},
-            headers={"X-API-KEY": api_key, "Content-Type": "application/json"},
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        return data.get("organic", [])
+    return await search_serper(query, api_key, num=num)
 
 
 async def _deep_research_professor(prof: dict, llm, serper_key: str) -> str:
@@ -84,6 +76,9 @@ async def _deep_research_professor(prof: dict, llm, serper_key: str) -> str:
         try:
             results = await _search_serper(q, serper_key, num=8)
             all_results.extend(results)
+        except SerperAPIError as e:
+            logger.warning("Serper unavailable during deep research for %s: %s", name, e)
+            return f"（代表作检索暂不可用：{e}）"
         except Exception as e:
             logger.warning(f"Deep research 搜索失败 ({q}): {e}")
         await asyncio.sleep(0.3)

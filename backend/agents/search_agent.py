@@ -18,6 +18,7 @@ from langchain_core.tools import tool
 
 from backend.core.llm import get_llm, load_yaml_config, load_profile
 from backend.core.prompts import load_prompt
+from backend.core.serper import SerperAPIError, search_serper as request_serper
 from backend.core import database as db
 
 logger = logging.getLogger(__name__)
@@ -133,14 +134,9 @@ async def search_google(query: str) -> str:
     if _progress_queue:
         await _progress_queue.put({"type": "progress", "message": f"🔍 搜索: {query}"})
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                "https://google.serper.dev/search",
-                json={"q": query, "num": 10},
-                headers={"X-API-KEY": _serper_key, "Content-Type": "application/json"},
-            )
-            resp.raise_for_status()
-            results = resp.json().get("organic", [])
+        results = await search_serper(query, _serper_key, num=10)
+    except SerperAPIError:
+        raise
     except Exception as e:
         return f"搜索出错: {e}"
     if not results:
@@ -540,6 +536,8 @@ async def _candidate_enrichment_search(
             await _progress_queue.put({"type": "progress", "message": f"🔍 补全搜索: {q}"})
         try:
             all_results.extend(await search_serper(q, _serper_key, num=6))
+        except SerperAPIError:
+            raise
         except Exception as e:
             logger.warning(f"Candidate enrichment search failed for '{q}': {e}")
         await asyncio.sleep(0.2)
@@ -831,15 +829,7 @@ def _build_search_system_prompt() -> str:
 
 async def search_serper(query: str, api_key: str, num: int = 10) -> list[dict]:
     """调用 Serper API 进行 Google 搜索"""
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(
-            "https://google.serper.dev/search",
-            json={"q": query, "num": num},
-            headers={"X-API-KEY": api_key, "Content-Type": "application/json"},
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        return data.get("organic", [])
+    return await request_serper(query, api_key, num=num)
 
 
 
@@ -903,6 +893,10 @@ async def enrich_professor(
         try:
             results = await search_serper(q, serper_key, num=8)
             all_results.extend(results)
+        except SerperAPIError as e:
+            logger.warning("Serper unavailable while enriching %s: %s", name, e)
+            await emit(str(e))
+            return {"success": False, "message": str(e)}
         except Exception as e:
             logger.warning(f"Enrich search failed for '{q}': {e}")
             await emit(f"搜索失败：{q} ({e})")
@@ -1026,72 +1020,79 @@ async def search_professors(
 
     _progress_queue = asyncio.Queue()
 
-    llm = get_llm()
-    tools = [
-        search_csrankings,
-        search_google,
-        enrich_candidate_info,
-        check_professor_exists,
-        save_professor,
-        get_existing_professors,
-        get_user_profile,
-    ]
-    llm_with_tools = llm.bind_tools(tools)
-    tool_map = {t.name: t for t in tools}
+    try:
+        llm = get_llm()
+        tools = [
+            search_csrankings,
+            search_google,
+            enrich_candidate_info,
+            check_professor_exists,
+            save_professor,
+            get_existing_professors,
+            get_user_profile,
+        ]
+        llm_with_tools = llm.bind_tools(tools)
+        tool_map = {t.name: t for t in tools}
 
-    runtime_requirements = []
-    if keywords:
-        runtime_requirements.append(f"本次搜索关键词: {', '.join(keywords)}")
-    if regions:
-        runtime_requirements.append(f"本次目标地区: {', '.join(regions)}")
-    runtime_extra = ("\n" + "\n".join(runtime_requirements)) if runtime_requirements else ""
+        runtime_requirements = []
+        if keywords:
+            runtime_requirements.append(f"本次搜索关键词: {', '.join(keywords)}")
+        if regions:
+            runtime_requirements.append(f"本次目标地区: {', '.join(regions)}")
+        runtime_extra = ("\n" + "\n".join(runtime_requirements)) if runtime_requirements else ""
 
-    messages = [
-        SystemMessage(content=_build_search_system_prompt()),
-        HumanMessage(content=f"请开始搜索导师，目标找到约 {max_results} 位匹配的新导师。{runtime_extra}"),
-    ]
+        messages = [
+            SystemMessage(content=_build_search_system_prompt()),
+            HumanMessage(content=f"请开始搜索导师，目标找到约 {max_results} 位匹配的新导师。{runtime_extra}"),
+        ]
 
-    yield {"type": "progress", "message": "🤖 Agent 已启动，正在自主规划搜索策略..."}
+        yield {"type": "progress", "message": "🤖 Agent 已启动，正在自主规划搜索策略..."}
 
-    for round_num in range(MAX_TOOL_ROUNDS):
-        try:
-            response = await llm_with_tools.ainvoke(messages)
-        except Exception as e:
-            yield {"type": "error", "message": f"Agent LLM 调用失败: {e}"}
-            break
+        for round_num in range(MAX_TOOL_ROUNDS):
+            try:
+                response = await llm_with_tools.ainvoke(messages)
+            except Exception as e:
+                yield {"type": "error", "message": f"Agent LLM 调用失败: {e}"}
+                return
 
-        messages.append(response)
+            messages.append(response)
 
-        # If LLM returns no tool calls → agent is done
-        if not response.tool_calls:
-            if response.content:
-                yield {"type": "progress", "message": f"🤖 Agent 总结:\n{response.content}"}
-            break
+            # If LLM returns no tool calls → agent is done
+            if not response.tool_calls:
+                if response.content:
+                    yield {"type": "progress", "message": f"🤖 Agent 总结:\n{response.content}"}
+                break
 
-        # Execute each tool call
-        for tc in response.tool_calls:
-            tool_name = tc["name"]
-            tool_args = tc["args"]
+            # Execute each tool call
+            for tc in response.tool_calls:
+                tool_name = tc["name"]
+                tool_args = tc["args"]
 
-            yield {"type": "progress", "message": f"⚡ 调用工具: {tool_name}"}
+                yield {"type": "progress", "message": f"⚡ 调用工具: {tool_name}"}
 
-            fn = tool_map.get(tool_name)
-            if fn:
-                try:
-                    result = await fn.ainvoke(tool_args)
-                except Exception as e:
-                    result = f"工具执行出错: {e}"
-            else:
-                result = f"未知工具: {tool_name}"
+                fn = tool_map.get(tool_name)
+                if fn:
+                    try:
+                        result = await fn.ainvoke(tool_args)
+                    except SerperAPIError as e:
+                        while not _progress_queue.empty():
+                            yield await _progress_queue.get()
+                        yield {"type": "error", "message": str(e)}
+                        return
+                    except Exception as e:
+                        result = f"工具执行出错: {e}"
+                else:
+                    result = f"未知工具: {tool_name}"
 
-            messages.append(ToolMessage(content=str(result), tool_call_id=tc["id"]))
+                messages.append(ToolMessage(content=str(result), tool_call_id=tc["id"]))
 
-            # Drain progress queue (tools push messages here)
-            while not _progress_queue.empty():
-                yield await _progress_queue.get()
+                # Drain progress queue (tools push messages here)
+                while not _progress_queue.empty():
+                    yield await _progress_queue.get()
 
-        await asyncio.sleep(0.3)
+            await asyncio.sleep(0.3)
 
-    _progress_queue = None
-    all_profs = await db.get_professors()
-    yield {"type": "done", "total": len(all_profs)}
+        all_profs = await db.get_professors()
+        yield {"type": "done", "total": len(all_profs)}
+    finally:
+        _progress_queue = None

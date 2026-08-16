@@ -234,6 +234,40 @@ async def start_enrich_prof(prof_id: int):
 # ── 搜索导师 ──────────────────────────────────────────
 
 _search_task: Optional[asyncio.Task] = None
+_SEARCH_LOG_LIMIT = 200
+_search_state: dict = {
+    "running": False,
+    "logs": [],
+    "last_error": None,
+}
+
+
+def _record_search_message(message: dict) -> None:
+    text = str(message.get("message") or "").strip()
+    message_type = message.get("type")
+    if message_type == "done" and not text:
+        total = message.get("total")
+        text = f"搜索完成，导师库当前共 {total} 人" if total is not None else "搜索完成"
+    if text:
+        _search_state["logs"] = [*_search_state["logs"], text][-_SEARCH_LOG_LIMIT:]
+    if message_type == "error":
+        _search_state["last_error"] = text or "搜索失败"
+
+
+def _search_status() -> dict:
+    running = bool(_search_task and not _search_task.done())
+    _search_state["running"] = running
+    return {
+        "running": running,
+        "logs": list(_search_state["logs"]),
+        "last_error": _search_state["last_error"],
+    }
+
+
+@router.get("/search/status")
+async def get_search_status():
+    """返回搜索任务真实状态和最近日志，供前端刷新后恢复。"""
+    return _search_status()
 
 
 @router.post("/search/start")
@@ -241,24 +275,49 @@ async def start_search(req: SearchRequest):
     """启动导师搜索（后台任务，进度通过 WebSocket 推送）"""
     global _search_task
     if _search_task and not _search_task.done():
-        return {"message": "搜索正在进行中，请先终止当前搜索"}
+        return {
+            "started": False,
+            "message": "搜索正在进行中",
+            **_search_status(),
+        }
+
+    _search_state.update({
+        "running": True,
+        "logs": ["搜索任务已提交，正在启动 Agent"],
+        "last_error": None,
+    })
 
     async def _run():
+        global _search_task
+        current_task = asyncio.current_task()
         try:
             async for msg in search_professors(
                 keywords=req.keywords,
                 regions=req.regions,
                 max_results=req.max_results,
             ):
+                _record_search_message(msg)
                 await manager.broadcast({"channel": "search", **msg})
         except asyncio.CancelledError:
-            await manager.broadcast({"channel": "search", "type": "error", "message": "搜索已被用户终止"})
+            message = {"type": "error", "message": "搜索已被用户终止"}
+            _record_search_message(message)
+            await manager.broadcast({"channel": "search", **message})
         except Exception as e:
             logger.exception("搜索任务异常")
-            await manager.broadcast({"channel": "search", "type": "error", "message": str(e)})
+            message = {"type": "error", "message": str(e)}
+            _record_search_message(message)
+            await manager.broadcast({"channel": "search", **message})
+        finally:
+            _search_state["running"] = False
+            if _search_task is current_task:
+                _search_task = None
 
     _search_task = asyncio.create_task(_run())
-    return {"message": "搜索已启动"}
+    return {
+        "started": True,
+        "message": "搜索已启动",
+        **_search_status(),
+    }
 
 
 @router.post("/search/stop")
@@ -266,10 +325,14 @@ async def stop_search():
     """终止正在进行的搜索"""
     global _search_task
     if _search_task and not _search_task.done():
-        _search_task.cancel()
-        _search_task = None
-        return {"message": "搜索已终止"}
-    return {"message": "当前没有正在进行的搜索"}
+        task = _search_task
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        return {"message": "搜索已终止", **_search_status()}
+    return {"message": "当前没有正在进行的搜索", **_search_status()}
 
 
 # ── 邮件草稿 ──────────────────────────────────────────
@@ -467,6 +530,7 @@ async def get_settings():
             "keywords": cfg.get("search", {}).get("keywords", []),
             "regions": cfg.get("search", {}).get("regions", []),
             "max_professors": cfg.get("search", {}).get("max_professors", 20),
+            "serper_api_key_set": bool(cfg.get("search", {}).get("serper_api_key", "")),
         },
         "smtp": {
             "host": cfg.get("smtp", {}).get("host", ""),
@@ -707,6 +771,7 @@ async def update_prompts(data: PromptsUpdate):
 class KeywordsUpdate(BaseModel):
     keywords: list[str]
     regions: Optional[list[str]] = None
+    serper_api_key: Optional[str] = None
 
 
 @router.put("/config/keywords")
@@ -719,9 +784,16 @@ async def update_keywords(data: KeywordsUpdate):
     cfg["search"]["keywords"] = data.keywords
     if data.regions is not None:
         cfg["search"]["regions"] = data.regions
+    if data.serper_api_key and data.serper_api_key.strip():
+        cfg["search"]["serper_api_key"] = data.serper_api_key.strip()
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
         yaml.dump(cfg, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
-    return {"message": "搜索关键词已更新", "keywords": data.keywords, "regions": cfg["search"].get("regions", [])}
+    return {
+        "message": "搜索配置已更新",
+        "keywords": data.keywords,
+        "regions": cfg["search"].get("regions", []),
+        "serper_api_key_set": bool(cfg["search"].get("serper_api_key", "")),
+    }
 
 
 # ── 邮箱验证 ──────────────────────────────────────

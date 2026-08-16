@@ -35,6 +35,8 @@ export default function SettingsPage() {
   const [regions, setRegions] = useState<string[]>([])
   const [newKw, setNewKw] = useState('')
   const [newRegion, setNewRegion] = useState('')
+  const [serperKey, setSerperKey] = useState('')
+  const [showSerperKey, setShowSerperKey] = useState(false)
   const [savingKw, setSavingKw] = useState(false)
   const [savedKw, setSavedKw] = useState(false)
 
@@ -193,7 +195,17 @@ export default function SettingsPage() {
   const handleSaveKeywords = async () => {
     setSavingKw(true)
     try {
-      await updateKeywords(keywords, regions)
+      const res = await updateKeywords(keywords, regions, serperKey.trim() || undefined)
+      setSerperKey('')
+      setSettings((prev: any) => ({
+        ...prev,
+        search: {
+          ...prev?.search,
+          keywords,
+          regions,
+          serper_api_key_set: Boolean(res.data?.serper_api_key_set),
+        },
+      }))
       setSavedKw(true)
       setTimeout(() => setSavedKw(false), 2000)
     } finally {
@@ -360,6 +372,16 @@ export default function SettingsPage() {
               <p className="mt-1 font-medium text-gray-900">{settings.llm?.provider || 'N/A'}</p>
             </div>
             <div className="rounded-lg border border-gray-200 p-4">
+              <p className="text-sm text-gray-500">Serper 搜索</p>
+              <p className="mt-1 font-medium">
+                {settings.search?.serper_api_key_set ? (
+                  <span className="text-green-600">已配置</span>
+                ) : (
+                  <span className="text-red-500">未配置</span>
+                )}
+              </p>
+            </div>
+            <div className="rounded-lg border border-gray-200 p-4">
               <p className="text-sm text-gray-500">SMTP 发件</p>
               <p className="mt-1 font-medium">
                 {settings.smtp?.configured ? (
@@ -384,7 +406,7 @@ export default function SettingsPage() {
             </div>
           </div>
           <p className="mt-4 text-sm text-gray-400">
-            SMTP / IMAP 也可在下方配置。LLM 后端见下方「LLM 后端配置」卡片，其余字段请编辑 <code className="rounded bg-gray-100 px-1 py-0.5">backend/config/config.yaml</code>。
+            API Key 和邮箱均可在下方配置；已保存的敏感字段不会回显到浏览器。
           </p>
         </div>
       )}
@@ -647,6 +669,30 @@ export default function SettingsPage() {
             {savingKw ? <Loader2 className="h-4 w-4 animate-spin" /> : savedKw ? <CheckCircle2 className="h-4 w-4" /> : <Save className="h-4 w-4" />}
             {savingKw ? '保存中...' : savedKw ? '已保存' : '保存'}
           </button>
+        </div>
+
+        <div className="mb-5">
+          <label className="block text-sm font-medium text-gray-700 mb-1.5">Serper API Key</label>
+          <p className="text-xs text-gray-400 mb-2">
+            用于 Google 搜索。{settings?.search?.serper_api_key_set ? '已配置，留空会保留当前 Key。' : '当前尚未配置。'}
+          </p>
+          <div className="relative">
+            <input
+              type={showSerperKey ? 'text' : 'password'}
+              autoComplete="new-password"
+              value={serperKey}
+              onChange={(e) => setSerperKey(e.target.value)}
+              placeholder={settings?.search?.serper_api_key_set ? '输入新 Key 以替换当前配置' : '输入 Serper API Key'}
+              className="w-full rounded-lg border border-gray-300 px-3 py-2 pr-10 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+            />
+            <button
+              onClick={() => setShowSerperKey(!showSerperKey)}
+              className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+              title={showSerperKey ? '隐藏 API Key' : '显示 API Key'}
+            >
+              {showSerperKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+            </button>
+          </div>
         </div>
 
         {/* 关键词 */}

@@ -63,7 +63,14 @@ export default function SearchModal({ open, logs, searching, onClose, onStop }: 
             )}
             {logs.map((msg, i) => {
               const isRound = msg.startsWith('═══')
-              const isError = msg.includes('失败') || msg.includes('出错') || msg.includes('终止')
+              const isError = (
+                msg.includes('失败')
+                || msg.includes('出错')
+                || msg.includes('终止')
+                || msg.includes('额度')
+                || msg.includes('API Key')
+                || msg.includes('无法连接')
+              )
               const isAnalysis = msg.startsWith('Agent 分析:')
               const isDone = msg.includes('停止搜索') || msg.includes('已达到目标')
               const isQuery = msg.startsWith('搜索 (')

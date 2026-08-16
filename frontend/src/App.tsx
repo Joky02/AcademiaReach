@@ -12,7 +12,13 @@ import Replies from './pages/Replies'
 import SettingsPage from './pages/Settings'
 import SearchModal from './components/SearchModal'
 import GlobalTaskIndicator from './components/GlobalTaskIndicator'
-import { connectWebSocket, getEnrichStatus, startSearch, stopSearch } from './services/api'
+import {
+  connectWebSocket,
+  getEnrichStatus,
+  getSearchStatus,
+  startSearch,
+  stopSearch,
+} from './services/api'
 
 const navItems = [
   { path: '/', label: 'Dashboard', icon: LayoutDashboard },
@@ -62,6 +68,22 @@ export default function App() {
     }
     syncEnrichStatus()
     const timer = window.setInterval(syncEnrichStatus, 5000)
+    return () => window.clearInterval(timer)
+  }, [])
+
+  useEffect(() => {
+    const syncSearchStatus = () => {
+      getSearchStatus()
+        .then((res) => {
+          setSearching(Boolean(res.data?.running))
+          if (Array.isArray(res.data?.logs)) {
+            setSearchLog(res.data.logs.map((item: any) => String(item)))
+          }
+        })
+        .catch(() => {})
+    }
+    syncSearchStatus()
+    const timer = window.setInterval(syncSearchStatus, 3000)
     return () => window.clearInterval(timer)
   }, [])
 
@@ -121,18 +143,35 @@ export default function App() {
       return
     }
     setSearching(true)
-    setSearchLog([])
+    setSearchLog(['正在提交搜索任务...'])
     setSearchModalOpen(true)
     try {
-      await startSearch({ max_results: 20 })
-    } catch {
+      const res = await startSearch({ max_results: 20 })
+      setSearching(Boolean(res.data?.running))
+      if (Array.isArray(res.data?.logs)) {
+        setSearchLog(res.data.logs.map((item: any) => String(item)))
+      }
+    } catch (error: any) {
       setSearching(false)
+      setSearchLog([
+        error.response?.data?.detail
+          || error.response?.data?.message
+          || error.message
+          || '搜索启动失败',
+      ])
     }
   }
 
   const handleStopSearch = async () => {
-    try { await stopSearch() } catch {}
-    setSearching(false)
+    try {
+      const res = await stopSearch()
+      setSearching(Boolean(res.data?.running))
+      if (Array.isArray(res.data?.logs)) {
+        setSearchLog(res.data.logs.map((item: any) => String(item)))
+      }
+    } catch {
+      setSearching(false)
+    }
   }
 
   const handleStartCompose = () => {

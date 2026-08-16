@@ -27,6 +27,7 @@ export const startEnrichProfessor = (id: number) => api.post(`/professors/${id}/
 export const getEnrichStatus = () => api.get('/professors/enrich/status')
 export const startSearch = (data: any) => api.post('/search/start', data)
 export const stopSearch = () => api.post('/search/stop')
+export const getSearchStatus = () => api.get('/search/status')
 
 // ── Drafts ───────────────────────────────────────────
 export const getDrafts = (status?: string) =>
@@ -84,8 +85,8 @@ export const deletePaper = (name: string) =>
   api.delete(`/config/papers/${encodeURIComponent(name)}`)
 
 // ── 搜索关键词 ──────────────────────────────────────
-export const updateKeywords = (keywords: string[], regions?: string[]) =>
-  api.put('/config/keywords', { keywords, regions })
+export const updateKeywords = (keywords: string[], regions?: string[], serperApiKey?: string) =>
+  api.put('/config/keywords', { keywords, regions, serper_api_key: serperApiKey })
 
 // ── 邮箱验证 ────────────────────────────────────────
 export const getEmailConfig = () => api.get('/config/email')
