@@ -57,10 +57,13 @@ cp deploy/cloudflare/config.yml.example deploy/cloudflare/config.yml
 ```dotenv
 CLOUDFLARED_CONFIG_FILE=./deploy/cloudflare/config.yml
 CLOUDFLARED_CREDENTIALS_FILE=/home/你的WSL用户名/.cloudflared/这里填写UUID.json
+CLOUDFLARED_USER=1000:1000
 TAOCI_ALLOWED_ORIGINS=http://localhost:5173
 TAOCI_CONFIG_DIR=./backend/config
 TAOCI_DATA_DIR=./backend/data
 ```
+
+`CLOUDFLARED_USER` 应与 credentials JSON 的所有者一致，可通过 `id -u` 和 `id -g` 查看。默认 WSL 用户通常为 `1000:1000`。
 
 生产环境的浏览器请求与 API 同源，不需要把公网域名加入 CORS。`TAOCI_ALLOWED_ORIGINS` 只用于 Vite 本地开发。
 

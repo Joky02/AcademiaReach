@@ -49,6 +49,7 @@ services:
 
   cloudflared:
     image: cloudflare/cloudflared:2026.7.1
+    user: ${CLOUDFLARED_USER:-1000:1000}
     restart: unless-stopped
     profiles:
       - tunnel
