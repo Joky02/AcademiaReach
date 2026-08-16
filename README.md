@@ -24,7 +24,7 @@
 
 | Module | Description |
 |--------|-------------|
-| **Professor Search** | LLM + CSRankings + Serper API auto-discovers professors worldwide; supports custom keywords / regions and manual entry |
+| **Professor Search** | Official Codex SDK + live web search auto-discovers new professors from official pages, Google Scholar, and CSRankings; Serper remains an optional fallback |
 | **Deep Research** | Before composing, automatically searches for each professor's representative papers and analyzes them with LLM |
 | **Email Composition** | LLM generates personalized cold emails based on professor's research + your profile (auto CN/EN switching) |
 | **Email Sending** | Human-reviewed drafts → edit → confirm → send via SMTP, with optional CN/EN PDF CV attachment |
@@ -40,6 +40,7 @@
 
 **Backend**
 - Python 3.11, FastAPI, Uvicorn
+- Official Codex Python SDK + host-side App Server worker
 - LangChain (OpenAI / DeepSeek / Ollama multi-backend)
 - SQLite (aiosqlite), Pydantic v2
 - SMTP sending, IMAP receiving, WebSocket
@@ -92,6 +93,8 @@ AcademiaReach/
 │   │   └── main.tsx
 │   ├── package.json
 │   └── vite.config.ts
+├── codex_worker/                 # Host-side Codex SDK worker (Unix socket)
+├── deploy/codex-worker.sh        # Worker install/start/stop helper
 ├── .gitignore
 ├── README.md
 └── README_CN.md
@@ -137,7 +140,7 @@ cp backend/prompts/compose_cn.md backend/config/prompts/compose_cn.md
 
 Edit `backend/config/config.yaml` and fill in:
 - **LLM API Key** — OpenAI / DeepSeek / Ollama (also supports OpenAI-compatible third-party APIs)
-- **Serper API Key** — For professor search (free at [serper.dev](https://serper.dev))
+- **Search provider** — `codex` reuses the local Codex login; `serper` is an optional legacy provider/fallback
 - **SMTP credentials** — Outgoing email (can also be verified and saved from the UI)
 - **IMAP credentials** — Incoming email, used for reply tracking
 
@@ -150,9 +153,17 @@ Edit `backend/config/email_templates/compose_en.md` to set the fixed English sub
 ### 5. Launch
 
 ```bash
+# One-time Codex setup
+codex login
+./deploy/codex-worker.sh install
+
+# Start the host-side Codex Worker
+./deploy/codex-worker.sh start
+
 # Terminal 1: Backend
 conda activate academia
-uvicorn backend.main:app --reload --port 8000
+TAOCI_CODEX_SOCKET=/tmp/taoci-codex-$(id -u)/worker.sock \
+  uvicorn backend.main:app --reload --port 8000
 
 # Terminal 2: Frontend
 cd frontend
@@ -187,7 +198,11 @@ llm:
     base_url: "http://localhost:11434"
 
 search:
-  serper_api_key: "..."
+  provider: codex                    # codex / serper
+  codex:
+    timeout_seconds: 900
+    fallback_to_serper: false
+  serper_api_key: "..."              # Optional fallback only
   keywords:
     - "machine learning"
     - "natural language processing"
@@ -231,7 +246,7 @@ Upload CN/EN PDF CVs in the Settings page. When sending emails, the system autom
 ## Usage Guide
 
 1. **Dashboard** — View stats (total professors, sent, replied) and live search/compose logs
-2. **Professors** — Click "Auto Search" to configure keywords and regions, then let LLM+CSRankings+Serper find professors; or add manually. Click a professor card for details
+2. **Professors** — Click "Auto Search" to configure keywords and regions, then let Codex discover and verify new professors; or add manually. Click a professor card for details
 3. **Drafts** — Click "Generate Drafts" to batch-compose emails for all professors without drafts. Deep Research runs automatically for each professor before composing. Preview, edit subject/body, or skip as needed
 4. **Sent** — View all sent emails and timestamps
 5. **Replies** — System polls IMAP every 5 minutes (dual strategy: FROM exact match + SUBJECT match). You can also click "Check Replies" manually
@@ -279,6 +294,7 @@ Upload CN/EN PDF CVs in the Settings page. When sending emails, the system autom
 | GET | `/api/config/profile` | Get profile |
 | PUT | `/api/config/profile` | Update profile |
 | GET | `/api/config/settings` | Get system config (sanitized) |
+| GET | `/api/codex/status` | Check the host-side Codex Worker |
 | PUT | `/api/config/keywords` | Update search keywords / regions |
 | GET | `/api/config/prompts` | Get custom prompts |
 | PUT | `/api/config/prompts` | Update custom prompts |

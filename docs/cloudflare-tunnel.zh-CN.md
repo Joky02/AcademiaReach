@@ -16,6 +16,9 @@ Nginx 只监听容器网络命名空间内的 `127.0.0.1:8080`，Compose 不向�
 
 ```bash
 cp .env.example .env
+codex login
+./deploy/codex-worker.sh install
+./deploy/codex-worker.sh start
 docker compose build backend web
 ```
 
@@ -23,6 +26,15 @@ docker compose build backend web
 
 - `backend/config`：API Key、邮箱凭据、Profile、附件和私有模板
 - `backend/data`：SQLite 数据库
+- `/tmp/taoci-codex-1000`：仅包含后端与宿主机 Codex Worker 通信的 Unix Socket 和运行日志
+
+Codex Worker 以当前 WSL 用户运行并复用 `~/.codex` 中的现有登录。Docker
+后端只挂载该临时 Socket 目录，不会挂载 Codex 登录目录，也不会获得 ChatGPT
+凭据。Codex thread 的工作目录是临时目录中的空目录，不是项目仓库；搜索只接收
+后端主动传入的 Profile 摘要和已存在导师索引。
+
+项目位于 WSL 的 `/mnt/c` 时不能把 Socket 放在项目目录，因为 DrvFS 不支持
+Unix Socket。默认 `/tmp/taoci-codex-1000` 位于 WSL 原生 Linux 文件系统。
 
 可以在 `.env` 中通过 `TAOCI_CONFIG_DIR` 和 `TAOCI_DATA_DIR` 指向其他绝对路径。不要把真实配置、Tunnel JSON 凭据或 `.env` 提交到 Git。
 
@@ -61,6 +73,7 @@ CLOUDFLARED_USER=1000:1000
 TAOCI_ALLOWED_ORIGINS=http://localhost:5173
 TAOCI_CONFIG_DIR=./backend/config
 TAOCI_DATA_DIR=./backend/data
+TAOCI_CODEX_SOCKET_DIR=/tmp/taoci-codex-1000
 ```
 
 `CLOUDFLARED_USER` 应与 credentials JSON 的所有者一致，可通过 `id -u` 和 `id -g` 查看。默认 WSL 用户通常为 `1000:1000`。
@@ -111,6 +124,7 @@ tmux kill-session -t taoci-frontend
 启动生产容器：
 
 ```bash
+./deploy/codex-worker.sh status
 docker compose --profile tunnel up -d --build
 docker compose ps
 docker compose logs --tail=100 cloudflared
@@ -123,6 +137,7 @@ Cloudflare Dashboard 中 Tunnel 状态应变为 `Healthy`。此时应用没有 `
 ```bash
 docker compose exec web wget -qO- http://127.0.0.1:8080/healthz
 docker compose exec web wget -qO- http://127.0.0.1:8080/api/stats
+docker compose exec web wget -qO- http://127.0.0.1:8080/api/codex/status
 ```
 
 最后用无痕窗口访问公网域名，确认先出现 Cloudflare 登录页；登录后检查导师列表、草稿、附件上传和自动补全任务的实时状态。
@@ -131,20 +146,27 @@ docker compose exec web wget -qO- http://127.0.0.1:8080/api/stats
 
 ```bash
 # 查看状态
+./deploy/codex-worker.sh status
 docker compose ps
 
 # 查看日志
+./deploy/codex-worker.sh logs
 docker compose logs --tail=200 backend web cloudflared
 
 # 更新并重建
 git pull
+./deploy/codex-worker.sh restart
 docker compose --profile tunnel up -d --build
 
 # 停止服务
 docker compose --profile tunnel down
+./deploy/codex-worker.sh stop
 ```
 
 不要使用 `down -v`。电脑睡眠、关机或 Docker Desktop 停止后，Tunnel 会离线；需要全天可用时，应迁移到常开的服务器、NAS 或 VPS。
+
+WSL 或电脑重启后，需要先执行 `./deploy/codex-worker.sh start`，再启动或使用
+Docker 服务。设置页会显示 Codex Worker 的连接状态。
 
 ## Cloudflare 官方参考
 

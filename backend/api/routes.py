@@ -24,6 +24,7 @@ from backend.core.attachments import (
 from backend.core.models import (
     ProfessorCreate, DraftUpdate, SearchRequest,
 )
+from backend.core.codex_client import get_codex_worker_status
 from backend.agents.search_agent import search_professors, enrich_professor
 from backend.agents.compose_agent import compose_emails
 from backend.services.send_service import send_email, send_batch
@@ -516,6 +517,8 @@ async def get_settings():
             "base_url": sub.get("base_url", default_base),
             "api_key_set": bool(sub.get("api_key", "")),
         }
+    search_cfg = cfg.get("search", {}) or {}
+    codex_status = await get_codex_worker_status()
     safe_cfg = {
         "llm": {
             "provider": llm_cfg.get("provider", "openai"),
@@ -527,10 +530,12 @@ async def get_settings():
             },
         },
         "search": {
-            "keywords": cfg.get("search", {}).get("keywords", []),
-            "regions": cfg.get("search", {}).get("regions", []),
-            "max_professors": cfg.get("search", {}).get("max_professors", 20),
-            "serper_api_key_set": bool(cfg.get("search", {}).get("serper_api_key", "")),
+            "provider": search_cfg.get("provider", "serper"),
+            "keywords": search_cfg.get("keywords", []),
+            "regions": search_cfg.get("regions", []),
+            "max_professors": search_cfg.get("max_professors", 20),
+            "serper_api_key_set": bool(search_cfg.get("serper_api_key", "")),
+            "codex": codex_status,
         },
         "smtp": {
             "host": cfg.get("smtp", {}).get("host", ""),
@@ -545,6 +550,12 @@ async def get_settings():
         },
     }
     return safe_cfg
+
+
+@router.get("/codex/status")
+async def codex_status():
+    """Check the host-side Codex worker without exposing auth or config."""
+    return await get_codex_worker_status()
 
 
 # ── Prompt 模板编辑（backend/prompts/*.md）──────────

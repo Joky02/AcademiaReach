@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import {
   Save, Loader2, CheckCircle2, Upload, X, Plus, FileText,
-  Mail, Shield, AlertCircle, Eye, EyeOff, Sparkles, Cpu, Code, Ban,
+  Mail, Shield, AlertCircle, Eye, EyeOff, Sparkles, Cpu, Code, Ban, Bot,
 } from 'lucide-react'
 import {
   getProfile, updateProfile, generateProfile, getSettings, updateLlmConfig,
@@ -372,9 +372,19 @@ export default function SettingsPage() {
               <p className="mt-1 font-medium text-gray-900">{settings.llm?.provider || 'N/A'}</p>
             </div>
             <div className="rounded-lg border border-gray-200 p-4">
-              <p className="text-sm text-gray-500">Serper 搜索</p>
+              <div className="flex items-center gap-1.5 text-sm text-gray-500">
+                <Bot className="h-4 w-4" />
+                <span>搜索 Agent</span>
+              </div>
+              <p className="mt-1 text-xs text-gray-400">
+                {settings.search?.provider === 'codex' ? 'Codex SDK' : 'Serper'}
+              </p>
               <p className="mt-1 font-medium">
-                {settings.search?.serper_api_key_set ? (
+                {settings.search?.provider === 'codex' && settings.search?.codex?.available ? (
+                  <span className="text-green-600">已连接</span>
+                ) : settings.search?.provider === 'codex' ? (
+                  <span className="text-red-500">Worker 未运行</span>
+                ) : settings.search?.serper_api_key_set ? (
                   <span className="text-green-600">已配置</span>
                 ) : (
                   <span className="text-red-500">未配置</span>
@@ -674,7 +684,7 @@ export default function SettingsPage() {
         <div className="mb-5">
           <label className="block text-sm font-medium text-gray-700 mb-1.5">Serper API Key</label>
           <p className="text-xs text-gray-400 mb-2">
-            用于 Google 搜索。{settings?.search?.serper_api_key_set ? '已配置，留空会保留当前 Key。' : '当前尚未配置。'}
+            仅供 Serper 模式或 Codex 回退使用。{settings?.search?.serper_api_key_set ? '已配置，留空会保留当前 Key。' : '当前尚未配置。'}
           </p>
           <div className="relative">
             <input

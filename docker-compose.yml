@@ -7,9 +7,11 @@ services:
     init: true
     environment:
       TAOCI_ALLOWED_ORIGINS: ${TAOCI_ALLOWED_ORIGINS:-http://localhost:5173}
+      TAOCI_CODEX_SOCKET: /run/taoci-codex/worker.sock
     volumes:
       - ${TAOCI_CONFIG_DIR:-./backend/config}:/app/backend/config
       - ${TAOCI_DATA_DIR:-./backend/data}:/app/backend/data
+      - ${TAOCI_CODEX_SOCKET_DIR:-/tmp/taoci-codex-1000}:/run/taoci-codex
     expose:
       - "8000"
     read_only: true

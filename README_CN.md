@@ -24,7 +24,7 @@
 
 | 模块 | 功能 |
 |------|------|
-| **导师搜索** | LLM + CSRankings + Serper API 自动搜索海内外导师，支持自定义关键词 / 地区，也可手动添加 |
+| **导师搜索** | 官方 Codex SDK 结合实时网页搜索，从学校主页、Google Scholar 和 CSRankings 中发现新导师；Serper 可作为备用 |
 | **邮件撰写** | 根据导师研究方向 + 用户 Profile，LLM 生成个性化套磁邮件（中/英文自动切换） |
 | **邮件发送** | 草稿人工审核 → 编辑 → 确认发送（SMTP），支持附带中/英文 PDF 简历 |
 | **回复跟踪** | IMAP 轮询收件箱，双策略匹配导师回复（FROM 匹配 + 主题匹配），自动更新状态 |
@@ -39,6 +39,7 @@
 
 **后端**
 - Python 3.11, FastAPI, Uvicorn
+- 官方 Codex Python SDK + 宿主机 App Server Worker
 - LangChain (OpenAI / DeepSeek / Ollama 多后端)
 - SQLite (aiosqlite), Pydantic v2
 - SMTP 发送, IMAP 收件, WebSocket
@@ -91,6 +92,8 @@ AcademiaReach/
 │   │   └── main.tsx
 │   ├── package.json
 │   └── vite.config.ts
+├── codex_worker/                 # 宿主机 Codex SDK Worker（Unix Socket）
+├── deploy/codex-worker.sh        # Worker 安装与启停脚本
 ├── .gitignore
 └── README.md
 ```
@@ -135,7 +138,7 @@ cp backend/prompts/compose_cn.md backend/config/prompts/compose_cn.md
 
 编辑 `backend/config/config.yaml`，填入：
 - **LLM API Key** — OpenAI / DeepSeek / Ollama 任选其一（支持兼容 OpenAI 格式的第三方 API）
-- **Serper API Key** — 用于导师搜索（[serper.dev](https://serper.dev) 免费申请）
+- **搜索 provider** — `codex` 复用本机 Codex 登录；`serper` 仅作为旧版搜索或显式回退
 - **SMTP 凭据** — 发件邮箱（也可在前端设置页验证并保存）
 - **IMAP 凭据** — 收件邮箱，用于回复跟踪
 
@@ -148,9 +151,17 @@ cp backend/prompts/compose_cn.md backend/config/prompts/compose_cn.md
 ### 5. 启动
 
 ```bash
+# 首次配置 Codex
+codex login
+./deploy/codex-worker.sh install
+
+# 启动宿主机 Codex Worker
+./deploy/codex-worker.sh start
+
 # 终端 1：后端
 conda activate academia
-uvicorn backend.main:app --reload --port 8000
+TAOCI_CODEX_SOCKET=/tmp/taoci-codex-$(id -u)/worker.sock \
+  uvicorn backend.main:app --reload --port 8000
 
 # 终端 2：前端
 cd frontend
@@ -185,7 +196,11 @@ llm:
     base_url: "http://localhost:11434"
 
 search:
-  serper_api_key: "..."
+  provider: codex                    # codex / serper
+  codex:
+    timeout_seconds: 900
+    fallback_to_serper: false
+  serper_api_key: "..."              # 仅供可选回退
   keywords:
     - "machine learning"
     - "natural language processing"
@@ -229,7 +244,7 @@ prompts:
 ## 使用指南
 
 1. **Dashboard** — 查看导师总数、已发送、已回复等统计，以及实时搜索/生成日志
-2. **导师管理** — 点击"自动搜索"配置关键词和地区后启动 LLM+CSRankings+Serper 搜索，或手动添加导师；点击导师卡片查看详情
+2. **导师管理** — 点击"自动搜索"配置关键词和地区后，让 Codex 搜索并核验新导师，或手动添加导师；点击导师卡片查看详情
 3. **邮件草稿** — 点击"生成草稿"为所有未生成邮件的导师批量生成套磁邮件；可预览、编辑正文和主题、跳过不需要的
 4. **已发送** — 查看所有已发送邮件及发送时间
 5. **回复跟踪** — 系统每 5 分钟自动轮询 IMAP 收件箱（双策略：FROM 精确匹配 + SUBJECT 主题匹配），也可手动点击"检查回复"
@@ -277,6 +292,7 @@ prompts:
 | GET | `/api/config/profile` | 获取 Profile |
 | PUT | `/api/config/profile` | 更新 Profile |
 | GET | `/api/config/settings` | 获取系统配置（脱敏） |
+| GET | `/api/codex/status` | 检查宿主机 Codex Worker |
 | PUT | `/api/config/keywords` | 更新搜索关键词 / 地区 |
 | GET | `/api/config/prompts` | 获取自定义 Prompt |
 | PUT | `/api/config/prompts` | 更新自定义 Prompt |

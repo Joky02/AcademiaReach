@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import hashlib
 import html
 import io
 import json
@@ -19,6 +20,7 @@ from langchain_core.tools import tool
 from backend.core.llm import get_llm, load_yaml_config, load_profile
 from backend.core.prompts import load_prompt
 from backend.core.serper import SerperAPIError, search_serper as request_serper
+from backend.core.codex_client import CodexWorkerError, stream_codex_task
 from backend.core import database as db
 
 logger = logging.getLogger(__name__)
@@ -992,7 +994,7 @@ async def enrich_professor(
 
 # ── 主流程：Agent Tool-Calling Loop ──────────────────────
 
-async def search_professors(
+async def _search_professors_legacy(
     keywords: Optional[list[str]] = None,
     regions: Optional[list[str]] = None,
     max_results: int = 20,
@@ -1096,3 +1098,293 @@ async def search_professors(
         yield {"type": "done", "total": len(all_profs)}
     finally:
         _progress_queue = None
+
+
+def _codex_search_output_schema() -> dict[str, Any]:
+    candidate = {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string"},
+            "university": {"type": "string"},
+            "department": {"type": "string"},
+            "email": {"type": "string"},
+            "homepage": {"type": "string"},
+            "google_scholar": {"type": "string"},
+            "research_summary": {"type": "string"},
+            "recent_papers": {"type": "string"},
+            "region": {"type": "string"},
+            "tags": {"type": "array", "items": {"type": "string"}},
+            "sources": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": [
+            "name",
+            "university",
+            "department",
+            "email",
+            "homepage",
+            "google_scholar",
+            "research_summary",
+            "recent_papers",
+            "region",
+            "tags",
+            "sources",
+        ],
+        "additionalProperties": False,
+    }
+    return {
+        "type": "object",
+        "properties": {
+            "candidates": {"type": "array", "items": candidate},
+            "summary": {"type": "string"},
+        },
+        "required": ["candidates", "summary"],
+        "additionalProperties": False,
+    }
+
+
+def _compact_professor_index(professors: list[dict], blacklist: list[dict]) -> str:
+    lines = []
+    for prof in professors[:500]:
+        identities = [
+            str(prof.get("name") or "").strip(),
+            str(prof.get("university") or "").strip(),
+            _normalize_email(prof.get("email")),
+            str(prof.get("homepage") or "").strip(),
+            str(prof.get("google_scholar") or "").strip(),
+        ]
+        lines.append(" | ".join(value for value in identities if value))
+    if blacklist:
+        lines.append("REMOVED BY USER:")
+        lines.extend(
+            f"{item.get('name', '')} | {item.get('university', '')}"
+            for item in blacklist[:100]
+        )
+    return "\n".join(lines) or "(empty)"
+
+
+async def _build_codex_search_prompt(
+    keywords: list[str],
+    regions: list[str],
+    max_results: int,
+) -> str:
+    cfg = load_yaml_config()
+    preference = str(
+        (cfg.get("prompts", {}) or {}).get("search_preference", "")
+    ).strip()
+    profile = load_profile().strip()
+    professors = await db.get_professors()
+    blacklist = await db.get_blacklist()
+    existing_index = _compact_professor_index(professors, blacklist)
+
+    return f"""
+Find up to {max_results} NEW faculty members who are plausible PhD supervisors for
+the applicant below.
+
+Target research directions:
+{", ".join(keywords) or "(infer from applicant profile)"}
+
+Target regions:
+{", ".join(regions) or "(no region restriction)"}
+
+User search preference:
+{preference or "(none)"}
+
+Applicant profile:
+{profile[:6000] or "(profile not configured)"}
+
+Professors already covered by the local database or removed by the user:
+{existing_index}
+
+Requirements:
+- Prioritize professors not present in the existing index. Do not return an
+  existing or removed professor merely because the fit is strong.
+- Use several discovery paths, especially official faculty pages, personal
+  homepages, Google Scholar, and CSRankings. Prefer current, active faculty.
+- For a professor based in mainland China, verify and return the exact Chinese
+  name from an official Chinese source. For every other region, return the
+  English or romanized name and do not use a Chinese name.
+- Verify contact fields from public sources. Decode anti-crawler forms such as
+  "name {{at}} school {{dot}} edu", but leave email empty if it cannot be verified.
+- recent_papers should be a concise plain-text list of verified representative or
+  recent works. Never invent titles or publication status.
+- sources must contain the public URLs used to verify identity and affiliation.
+  Return no candidate without at least one credible source URL.
+- Return only the requested JSON. Use empty strings or empty arrays for unknown
+  fields.
+""".strip()
+
+
+async def _save_codex_candidate(candidate: dict[str, Any]) -> tuple[str, dict | None]:
+    name = str(candidate.get("name") or "").strip()
+    university = str(candidate.get("university") or "").strip()
+    region = str(candidate.get("region") or "").strip()
+    if not name or not university:
+        return "跳过字段不完整的候选人", None
+
+    mainland = _is_mainland_china(region, university)
+    if mainland and not _has_cjk(name):
+        return f"跳过 {name}：未核验到准确中文名", None
+    if not mainland and _has_cjk(name):
+        return f"跳过 {name}：非中国大陆导师应使用英文姓名", None
+    if await db.is_blacklisted(name, university):
+        return f"跳过黑名单导师：{name} @ {university}", None
+
+    sources = [
+        str(url).strip()
+        for url in candidate.get("sources", [])
+        if str(url).strip().startswith(("https://", "http://"))
+    ]
+    if not sources:
+        return f"跳过 {name}：缺少可核验的公开来源", None
+
+    email = _normalize_email(candidate.get("email"))
+    homepage = str(candidate.get("homepage") or "").strip()
+    google_scholar = str(candidate.get("google_scholar") or "").strip()
+    prof_data = {
+        "name": name,
+        "email": email,
+        "university": university,
+        "department": str(candidate.get("department") or "").strip(),
+        "homepage": homepage if homepage.startswith(("https://", "http://")) else "",
+        "google_scholar": (
+            google_scholar
+            if google_scholar.startswith(("https://", "http://"))
+            else ""
+        ),
+        "research_summary": str(candidate.get("research_summary") or "").strip(),
+        "recent_papers": str(candidate.get("recent_papers") or "").strip(),
+        "region": region,
+        "source": "auto",
+        "tags": json.dumps(
+            [
+                str(tag).strip()
+                for tag in candidate.get("tags", [])
+                if str(tag).strip()
+            ],
+            ensure_ascii=False,
+        ),
+    }
+    match = await db.find_existing_professor_match(prof_data)
+    if match:
+        existing = match["professor"]
+        return (
+            f"跳过已有导师：{existing.get('name')} @ {existing.get('university')}",
+            None,
+        )
+
+    if not email:
+        safe_name = re.sub(r"[^a-z0-9.]+", ".", name.lower()).strip(".")
+        safe_name = (safe_name or "professor")[:40]
+        identity_hash = hashlib.sha256(
+            f"{name}|{university}".encode("utf-8")
+        ).hexdigest()[:12]
+        prof_data["email"] = f"unknown-{safe_name}-{identity_hash}@tbd"
+
+    saved = await db.create_professor(prof_data)
+    if saved.get("_deduped"):
+        return f"跳过数据库已合并导师：{name} @ {university}", None
+    return f"已保存：{name} @ {university}", saved
+
+
+async def _search_professors_codex(
+    keywords: Optional[list[str]] = None,
+    regions: Optional[list[str]] = None,
+    max_results: int = 20,
+) -> AsyncGenerator[dict, None]:
+    cfg = load_yaml_config()
+    search_cfg = cfg.get("search", {}) or {}
+    codex_cfg = search_cfg.get("codex", {}) or {}
+    resolved_keywords = keywords or search_cfg.get("keywords", []) or []
+    resolved_regions = regions or search_cfg.get("regions", []) or []
+    max_results = max(1, min(int(max_results or 20), 40))
+    timeout_seconds = max(30, int(codex_cfg.get("timeout_seconds", 900)))
+    prompt = await _build_codex_search_prompt(
+        resolved_keywords,
+        resolved_regions,
+        max_results,
+    )
+
+    yield {"type": "progress", "message": "Codex Search Agent 已启动"}
+    result_data: dict[str, Any] | None = None
+    async for message in stream_codex_task(
+        prompt=prompt,
+        output_schema=_codex_search_output_schema(),
+        timeout_seconds=timeout_seconds,
+    ):
+        if message.get("type") == "progress":
+            yield {"type": "progress", "message": message.get("message", "")}
+        elif message.get("type") == "result":
+            data = message.get("data")
+            if isinstance(data, dict):
+                result_data = data
+
+    if result_data is None:
+        raise CodexWorkerError("Codex Worker 未返回结构化搜索结果")
+
+    candidates = result_data.get("candidates")
+    if not isinstance(candidates, list):
+        raise CodexWorkerError("Codex Worker 返回的 candidates 格式无效")
+
+    yield {
+        "type": "progress",
+        "message": f"Codex 找到 {len(candidates)} 位候选，正在进行本地校验和去重",
+    }
+    saved_count = 0
+    for raw_candidate in candidates[:max_results]:
+        if not isinstance(raw_candidate, dict):
+            continue
+        message, saved = await _save_codex_candidate(raw_candidate)
+        yield {"type": "progress", "message": message}
+        if saved:
+            saved_count += 1
+            yield {"type": "professor", "data": saved}
+
+    summary = str(result_data.get("summary") or "").strip()
+    if summary:
+        yield {"type": "progress", "message": f"Codex 总结：{summary}"}
+    all_professors = await db.get_professors()
+    yield {
+        "type": "done",
+        "total": len(all_professors),
+        "message": f"搜索完成，本次新增 {saved_count} 位导师",
+    }
+
+
+async def search_professors(
+    keywords: Optional[list[str]] = None,
+    regions: Optional[list[str]] = None,
+    max_results: int = 20,
+) -> AsyncGenerator[dict, None]:
+    """Dispatch professor discovery to the configured search provider."""
+    cfg = load_yaml_config()
+    search_cfg = cfg.get("search", {}) or {}
+    provider = str(search_cfg.get("provider", "serper")).strip().lower()
+
+    if provider == "codex":
+        try:
+            async for message in _search_professors_codex(
+                keywords=keywords,
+                regions=regions,
+                max_results=max_results,
+            ):
+                yield message
+            return
+        except CodexWorkerError as exc:
+            codex_cfg = search_cfg.get("codex", {}) or {}
+            if not codex_cfg.get("fallback_to_serper", False):
+                yield {"type": "error", "message": str(exc)}
+                return
+            yield {
+                "type": "progress",
+                "message": f"Codex 搜索不可用，切换到 Serper：{exc}",
+            }
+    elif provider != "serper":
+        yield {"type": "error", "message": f"未知搜索 provider：{provider}"}
+        return
+
+    async for message in _search_professors_legacy(
+        keywords=keywords,
+        regions=regions,
+        max_results=max_results,
+    ):
+        yield message
