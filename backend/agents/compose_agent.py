@@ -11,9 +11,8 @@ from typing import AsyncGenerator, Optional
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from backend.core.llm import get_llm, load_profile, load_yaml_config
-from backend.core.codex_llm import codex_invoke_options, is_codex_llm
+from backend.core.agent_llm import agent_invoke_options, is_harness_llm
 from backend.core.prompts import load_email_template, load_prompt
-from backend.core.serper import SerperAPIError, search_serper
 from backend.core import database as db
 
 logger = logging.getLogger(__name__)
@@ -108,14 +107,42 @@ def _compose_output_schema(lang: str) -> dict:
     }
 
 
-# ── Serper 搜索 ──────────────────────────────────────
+def _stored_recommended_papers(prof: dict) -> list[dict]:
+    raw = prof.get("recommended_papers") or []
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            return []
+    if not isinstance(raw, list):
+        return []
+    return [item for item in raw[:5] if isinstance(item, dict) and item.get("title")]
 
-async def _search_serper(query: str, api_key: str, num: int = 10) -> list[dict]:
-    """调用 Serper API 进行 Google 搜索"""
-    return await search_serper(query, api_key, num=num)
+
+def _format_stored_recommendations(prof: dict) -> str:
+    papers = _stored_recommended_papers(prof)
+    if not papers:
+        return ""
+    lines = ["已保存的个性化推荐论文（需要再次核验，不要盲目照抄）："]
+    for paper in papers:
+        citation_count = paper.get("citation_count")
+        metadata_parts = [
+            str(value).strip()
+            for value in (paper.get("venue"), paper.get("year"))
+            if value
+        ]
+        if isinstance(citation_count, int):
+            metadata_parts.append(f"被引 {citation_count}")
+        metadata = f"（{'，'.join(metadata_parts)}）" if metadata_parts else ""
+        lines.append(
+            f"- {paper.get('title')}{metadata}\n"
+            f"  推荐理由: {paper.get('why_recommended', '')}\n"
+            f"  来源: {paper.get('url', '')}"
+        )
+    return "\n".join(lines)
 
 
-async def _deep_research_professor(prof: dict, llm, serper_key: str) -> str:
+async def _deep_research_professor(prof: dict, llm) -> str:
     """
     对导师进行 deep research：搜索其代表作，用 LLM 分析论文并整理信息。
     返回格式化的研究分析文本，供邮件撰写 prompt 使用。
@@ -123,64 +150,28 @@ async def _deep_research_professor(prof: dict, llm, serper_key: str) -> str:
     name = prof["name"]
     university = prof["university"]
     research = prof.get("research_summary", "") or ""
+    stored_recommendations = _format_stored_recommendations(prof)
+    applicant_profile = load_profile().strip()
 
-    unique = []
-    if is_codex_llm(llm):
-        research_input = (
-            f"导师: {name}\n学校: {university}\n研究方向: {research}\n\n"
-            "请使用实时网页搜索核验这位导师的代表作、明确引用数、研究主题、"
-            "近两年研究重点和实验室信息。优先使用学校主页、个人主页、"
-            "Google Scholar 和正式论文页面。"
-        )
-    else:
-        queries = [
-            f'"{name}" {university} publications papers',
-            f'"{name}" {university} Google Scholar citations',
-            f'"{name}" "{university}" "Cited by"',
-            f'"{name}" {research.split(",")[0].strip() if research else ""} paper',
-        ]
+    if not is_harness_llm(llm):
+        return stored_recommendations or "（当前 Direct API 未启用网页搜索）"
 
-        all_results = []
-        for q in queries:
-            try:
-                results = await _search_serper(q, serper_key, num=8)
-                all_results.extend(results)
-            except SerperAPIError as e:
-                logger.warning(
-                    "Serper unavailable during deep research for %s: %s",
-                    name,
-                    e,
-                )
-                return f"（代表作检索暂不可用：{e}）"
-            except Exception as e:
-                logger.warning(f"Deep research 搜索失败 ({q}): {e}")
-            await asyncio.sleep(0.3)
-
-        if not all_results:
-            return "（未搜索到该导师的详细论文信息）"
-
-        seen = set()
-        for result in all_results:
-            link = result.get("link", "")
-            if link and link not in seen:
-                seen.add(link)
-                unique.append(result)
-
-        search_text = "\n\n".join(
-            f"Title: {r.get('title', '')}\nSnippet: {r.get('snippet', '')}\nLink: {r.get('link', '')}"
-            for r in unique[:15]
-        )
-        research_input = (
-            f"导师: {name}\n学校: {university}\n研究方向: {research}\n\n"
-            f"搜索结果:\n{search_text}"
-        )
+    research_input = (
+        f"导师: {name}\n学校: {university}\n研究方向: {research}\n\n"
+        f"申请者 Profile:\n{applicant_profile[:5000] or '(未配置)'}\n\n"
+        f"{stored_recommendations or '暂无已保存的个性化推荐论文'}\n\n"
+        "请使用实时网页搜索核验这位导师的代表作、明确引用数、研究主题、"
+        "近两年研究重点和实验室信息。优先使用学校主页、个人主页、"
+        "Google Scholar 和正式论文页面。优先核验与申请者方向自然相关的"
+        "已保存推荐；相关性相近时再按明确被引数排序。"
+    )
 
     # LLM 分析论文
     try:
         resp = await llm.ainvoke([
             SystemMessage(content=load_prompt("research_analyze")),
             HumanMessage(content=research_input),
-        ], **codex_invoke_options(
+        ], **agent_invoke_options(
             llm,
             "research",
             _research_output_schema(),
@@ -192,12 +183,7 @@ async def _deep_research_professor(prof: dict, llm, serper_key: str) -> str:
         research_data = json.loads(content)
     except Exception as e:
         logger.warning(f"Deep research LLM 分析失败 ({name}): {e}")
-        if is_codex_llm(llm):
-            return f"（Codex Deep Research 分析失败：{e}）"
-        return (
-            f"搜索到 {len(unique)} 条相关结果，但分析失败。"
-            f"原始信息:\n{search_text[:2000]}"
-        )
+        return f"（Agent Deep Research 分析失败：{e}）"
 
     # 格式化为文本
     lines = []
@@ -410,8 +396,6 @@ async def compose_emails(
     yield {"type": "progress", "message": f"将为 {len(professors)} 位导师生成套磁邮件（含 Deep Research）..."}
 
     llm = get_llm()
-    cfg = load_yaml_config()
-    serper_key = cfg.get("search", {}).get("serper_api_key", "")
     total_created = 0
 
     for i, prof in enumerate(professors):
@@ -424,12 +408,14 @@ async def compose_emails(
             "message": f"🔍 Deep Research ({i+1}/{len(professors)}): {prof['name']} @ {prof['university']}",
         }
 
-        research_result = "（搜索后端未配置，跳过论文搜索）"
-        if is_codex_llm(llm) or (
-            serper_key and serper_key != "your-serper-api-key"
-        ):
+        stored_recommendations = _format_stored_recommendations(prof)
+        research_result = (
+            stored_recommendations
+            or "（搜索后端未配置，且暂无已保存的推荐论文）"
+        )
+        if is_harness_llm(llm):
             try:
-                research_result = await _deep_research_professor(prof, llm, serper_key)
+                research_result = await _deep_research_professor(prof, llm)
             except Exception as e:
                 research_result = f"（Deep Research 出错: {e}）"
                 logger.warning(f"Deep research failed for {prof['name']}: {e}")
@@ -446,6 +432,7 @@ async def compose_emails(
             f"院系/Department: {prof.get('department', 'N/A')}\n"
             f"研究方向/Research: {prof.get('research_summary', 'N/A')}\n"
             f"近期论文/Recent Papers: {prof.get('recent_papers', 'N/A')}\n"
+            f"个性化推荐论文/Recommended Papers:\n{stored_recommendations or 'N/A'}\n"
             f"主页/Homepage: {prof.get('homepage', 'N/A')}\n"
             f"地区/Region: {prof.get('region', 'N/A')}"
         )
@@ -469,7 +456,7 @@ async def compose_emails(
 - 语言要像真人写给导师的短邮件：标准、清楚、克制；不要宣传稿口吻，不要 AI 套话，不要堆形容词
 - 第一段：必须使用系统提示里的中文固定模板；不要再写「X老师您好」
 - 第二段：选一个最匹配的项目，只讲做了什么/结论/能力收获；硬技能用顿号串在句子里，**禁止 Bullet 列表**
-- 第三段（**最关键**）：先从【申请者背景】和第二段判断申请者的硕士方向、已有论文方向或希望博士阶段继续研究的方向，再从【导师研究参考资料】的 representative_papers 里挑一篇最能接上的代表作；同一方向下优先选引用数更高的工作。不要生搬硬套：只有自然相关时才给一个轻量的结合想法；如果连接牵强，就只提出一个可请教、可交流的问题。第三段不要提申请者具体论文标题或方法名，不要写“我的论文/方法受到您这项工作的启发”。不要写得很强势，不要给太多细节，不要做确定性断言；用“也许、可能、希望进一步请教”这类低风险表达。**representative_papers 真为空时**才退化为一句方向概括，绝不编造论文标题
+- 第三段（**最关键**）：先从【申请者背景】和第二段判断申请者的硕士方向、已有论文方向或希望博士阶段继续研究的方向，再从已保存的个性化推荐论文或【导师研究参考资料】的 representative_papers 里挑一篇最能接上的代表作；同一方向下优先选引用数更高的工作。不要生搬硬套：只有自然相关时才给一个轻量的结合想法；如果连接牵强，就只提出一个可请教、可交流的问题。第三段不要提申请者具体论文标题或方法名，不要写“我的论文/方法受到您这项工作的启发”。不要写得很强势，不要给太多细节，不要做确定性断言；用“也许、可能、希望进一步请教”这类低风险表达。确实没有可靠论文时才退化为一句方向概括，绝不编造论文标题
 - 签收：附简历 + 期待进一步交流 + 致谢 + 落款
 - 总字数 360-480 字；通篇散文"""
         else:
@@ -499,7 +486,7 @@ Key requirements:
             response = await llm.ainvoke([
                 SystemMessage(content=system_prompt),
                 HumanMessage(content=user_msg),
-            ], **codex_invoke_options(
+            ], **agent_invoke_options(
                 llm,
                 "compose",
                 _compose_output_schema(lang),

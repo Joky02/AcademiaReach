@@ -24,9 +24,10 @@
 
 | Module | Description |
 |--------|-------------|
-| **Global LLM Backend** | Select Codex App Server, OpenAI-compatible APIs, DeepSeek, or Ollama from Settings; Codex uses task-specific harnesses without an API key |
-| **Professor Search** | Official Codex SDK + live web search auto-discovers new professors from official pages, Google Scholar, and CSRankings; Serper remains an optional fallback |
-| **Deep Research** | Codex uses its live-web research harness; other providers use Serper results plus the selected LLM |
+| **Global Agent Backend** | Independently select Direct API, Pi Harness, or Codex App Server; Pi runs task harnesses over the existing OpenAI-compatible, DeepSeek, or Ollama API |
+| **Professor Search** | Codex/Pi use live web search to discover new professors from official pages, Google Scholar, and CSRankings |
+| **Deep Research** | Codex/Pi use task-specific research harnesses for professor research and paper recommendations |
+| **Personalized Paper Reading List** | Professor enrichment recommends verified, representative papers matched to the applicant profile, with citation evidence, reading rationale, and source links reused during email composition |
 | **Email Composition** | LLM generates personalized cold emails based on professor's research + your profile (auto CN/EN switching) |
 | **Email Sending** | Human-reviewed drafts → edit → confirm → send via SMTP, with optional CN/EN PDF CV attachment |
 | **Reply Tracking** | IMAP inbox polling with dual matching strategy (FROM address + SUBJECT line) to catch replies reliably |
@@ -42,7 +43,8 @@
 **Backend**
 - Python 3.11, FastAPI, Uvicorn
 - Official Codex Python SDK + host-side App Server worker
-- LangChain-compatible Codex / OpenAI / DeepSeek / Ollama providers
+- Official Pi TypeScript SDK + isolated Bun worker
+- Independent harness engine and OpenAI / DeepSeek / Ollama model API selection
 - SQLite (aiosqlite), Pydantic v2
 - SMTP sending, IMAP receiving, WebSocket
 
@@ -59,14 +61,14 @@
 AcademiaReach/
 ├── backend/
 │   ├── config/
-│   │   ├── config.yaml.example  # Config template (copy to config.yaml and fill in)
-│   │   └── my_profile.md        # Your profile (research background, publications, etc.)
+│   │   ├── config.yaml.example  # Public config template (copy to ignored config.yaml)
+│   │   └── my_profile.example.md # Public profile template (copy to ignored my_profile.md)
 │   ├── core/
 │   │   ├── models.py            # Pydantic data models
 │   │   ├── database.py          # Async SQLite CRUD
 │   │   └── llm.py               # Unified LLM interface (multi-backend)
 │   ├── agents/
-│   │   ├── search_agent.py      # Professor Search Agent (LLM planning + CSRankings + Serper + extraction)
+│   │   ├── search_agent.py      # Professor Search Agent (Harness web search + CSRankings + extraction)
 │   │   └── compose_agent.py     # Email Compose Agent (Deep Research + CN/EN prompts + custom style)
 │   ├── services/
 │   │   ├── send_service.py      # SMTP email sending + CV attachment
@@ -96,6 +98,8 @@ AcademiaReach/
 │   └── vite.config.ts
 ├── codex_worker/                 # Host-side Codex SDK worker (Unix socket)
 ├── deploy/codex-worker.sh        # Worker install/start/stop helper
+├── pi_worker/                   # Pi SDK worker (Bun + Unix socket)
+├── deploy/pi-worker.sh          # Pi worker install/start/stop helper
 ├── .gitignore
 ├── README.md
 └── README_CN.md
@@ -140,8 +144,9 @@ cp backend/prompts/compose_cn.md backend/config/prompts/compose_cn.md
 ```
 
 Edit `backend/config/config.yaml` and fill in:
-- **Global LLM provider** — Codex reuses `codex login`; OpenAI / DeepSeek require an API key; Ollama is local
-- **Search provider** — `auto` follows the global provider; Codex uses its search harness, while other providers use the Serper tool chain
+- **Agent engine** — `direct`, `pi`, or `codex`; Pi supplies task harnesses without requiring a subscription
+- **Model API** — Pi and Direct share the OpenAI-compatible, DeepSeek, or Ollama configuration
+- **Search backend** — professor search and enrichment require the selected Codex or Pi Harness
 - **SMTP credentials** — Outgoing email (can also be verified and saved from the UI)
 - **IMAP credentials** — Incoming email, used for reply tracking
 
@@ -161,9 +166,14 @@ codex login
 # Start the host-side Codex Worker
 ./deploy/codex-worker.sh start
 
+# Install once, then start the Pi SDK Worker
+./deploy/pi-worker.sh install
+./deploy/pi-worker.sh start
+
 # Terminal 1: Backend
 conda activate academia
 TAOCI_CODEX_SOCKET=/tmp/taoci-codex-$(id -u)/worker.sock \
+TAOCI_PI_SOCKET=/tmp/taoci-pi-$(id -u)/worker.sock \
   uvicorn backend.main:app --reload --port 8000
 
 # Terminal 2: Frontend
@@ -185,9 +195,12 @@ Open **http://localhost:5173** in your browser.
 
 ```yaml
 llm:
-  provider: codex                   # codex / openai / deepseek / ollama
+  agent_backend: pi               # direct / pi / codex
+  provider: deepseek               # openai / deepseek / ollama; used by direct/pi
   codex:
     model: ""                       # Empty uses the account default
+    timeout_seconds: 600
+  pi:
     timeout_seconds: 600
   openai:
     api_key: "sk-..."
@@ -202,11 +215,10 @@ llm:
     base_url: "http://localhost:11434"
 
 search:
-  provider: auto                     # auto / codex / serper; global Codex always uses its harness
-  codex:
-    timeout_seconds: 900
-    fallback_to_serper: false
-  serper_api_key: "..."              # Optional fallback only
+  agent:
+    timeout_seconds: 120             # Per-batch timeout
+    batch_size: 3                    # Candidates saved after each batch
+    parallel_batches: 2
   keywords:
     - "machine learning"
     - "natural language processing"
@@ -299,6 +311,7 @@ Upload CN/EN PDF CVs in the Settings page. When sending emails, the system autom
 | PUT | `/api/config/profile` | Update profile |
 | GET | `/api/config/settings` | Get system config (sanitized) |
 | GET | `/api/codex/status` | Check the host-side Codex Worker |
+| GET | `/api/pi/status` | Check the Pi SDK Worker |
 | PUT | `/api/config/keywords` | Update search keywords / regions |
 | GET | `/api/config/prompts` | Get custom prompts |
 | PUT | `/api/config/prompts` | Update custom prompts |

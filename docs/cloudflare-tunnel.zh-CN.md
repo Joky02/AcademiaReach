@@ -19,7 +19,7 @@ cp .env.example .env
 codex login
 ./deploy/codex-worker.sh install
 ./deploy/codex-worker.sh start
-docker compose build backend web
+docker compose build backend pi-worker web
 ```
 
 以下目录以可写 bind mount 持久化，真实数据不会进入镜像：
@@ -27,6 +27,7 @@ docker compose build backend web
 - `backend/config`：API Key、邮箱凭据、Profile、附件和私有模板
 - `backend/data`：SQLite 数据库
 - `/tmp/taoci-codex-1000`：仅包含后端与宿主机 Codex Worker 通信的 Unix Socket 和运行日志
+- `/tmp/taoci-pi-1000`：仅包含后端与 Pi SDK Worker 通信的 Unix Socket
 
 Codex Worker 以当前 WSL 用户运行并复用 `~/.codex` 中的现有登录。Docker
 后端只挂载该临时 Socket 目录，不会挂载 Codex 登录目录，也不会获得 ChatGPT
@@ -75,6 +76,7 @@ TAOCI_ALLOWED_ORIGINS=http://localhost:5173
 TAOCI_CONFIG_DIR=./backend/config
 TAOCI_DATA_DIR=./backend/data
 TAOCI_CODEX_SOCKET_DIR=/tmp/taoci-codex-1000
+TAOCI_PI_SOCKET_DIR=/tmp/taoci-pi-1000
 ```
 
 `CLOUDFLARED_USER` 应与 credentials JSON 的所有者一致，可通过 `id -u` 和 `id -g` 查看。默认 WSL 用户通常为 `1000:1000`。
@@ -126,10 +128,14 @@ tmux kill-session -t taoci-frontend
 
 ```bash
 ./deploy/codex-worker.sh status
+mkdir -p /tmp/taoci-pi-$(id -u)
+chmod 700 /tmp/taoci-pi-$(id -u)
 docker compose --profile tunnel up -d --build
 docker compose ps
 docker compose logs --tail=100 cloudflared
 ```
+
+`TAOCI_PI_SOCKET_DIR` 如果改成了其他路径，上面两条命令也要使用同一路径。预先创建目录可以确保以非 root 用户运行的 Pi Worker 能创建 Unix Socket。
 
 Cloudflare Dashboard 中 Tunnel 状态应变为 `Healthy`。此时应用没有 `localhost:8080` 入口，只能通过受 Access 保护的域名访问。
 
@@ -139,6 +145,7 @@ Cloudflare Dashboard 中 Tunnel 状态应变为 `Healthy`。此时应用没有 `
 docker compose exec web wget -qO- http://127.0.0.1:8080/healthz
 docker compose exec web wget -qO- http://127.0.0.1:8080/api/stats
 docker compose exec web wget -qO- http://127.0.0.1:8080/api/codex/status
+docker compose exec web wget -qO- http://127.0.0.1:8080/api/pi/status
 ```
 
 最后用无痕窗口访问公网域名，确认先出现 Cloudflare 登录页；登录后检查导师列表、草稿、附件上传和自动补全任务的实时状态。
@@ -152,7 +159,7 @@ docker compose ps
 
 # 查看日志
 ./deploy/codex-worker.sh logs
-docker compose logs --tail=200 backend web cloudflared
+docker compose logs --tail=200 backend pi-worker web cloudflared
 
 # 更新并重建
 git pull

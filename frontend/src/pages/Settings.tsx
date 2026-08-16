@@ -13,7 +13,8 @@ import {
   getBlacklist, removeFromBlacklist,
 } from '../services/api'
 
-type LlmProvider = 'codex' | 'openai' | 'deepseek' | 'ollama'
+type ModelProvider = 'openai' | 'deepseek' | 'ollama'
+type AgentBackend = 'direct' | 'codex' | 'pi'
 
 export default function SettingsPage() {
   const [profile, setProfile] = useState('')
@@ -35,8 +36,6 @@ export default function SettingsPage() {
   const [regions, setRegions] = useState<string[]>([])
   const [newKw, setNewKw] = useState('')
   const [newRegion, setNewRegion] = useState('')
-  const [serperKey, setSerperKey] = useState('')
-  const [showSerperKey, setShowSerperKey] = useState(false)
   const [savingKw, setSavingKw] = useState(false)
   const [savedKw, setSavedKw] = useState(false)
 
@@ -61,9 +60,11 @@ export default function SettingsPage() {
   const [savedPrompt, setSavedPrompt] = useState(false)
 
   // LLM 后端配置
-  const [llmProvider, setLlmProvider] = useState<LlmProvider>('openai')
+  const [agentBackend, setAgentBackend] = useState<AgentBackend>('direct')
+  const [llmProvider, setLlmProvider] = useState<ModelProvider>('openai')
   const [llmForm, setLlmForm] = useState({
     codex: { model: '', timeout_seconds: 600 },
+    pi: { timeout_seconds: 600 },
     openai: { model: '', base_url: '', api_key: '', api_key_set: false },
     deepseek: { model: '', base_url: '', api_key: '', api_key_set: false },
     ollama: { model: '', base_url: '' },
@@ -103,11 +104,15 @@ export default function SettingsPage() {
         setKeywords(setRes.data.search?.keywords || [])
         setRegions(setRes.data.search?.regions || [])
         const llm = setRes.data.llm || {}
-        setLlmProvider((llm.provider as LlmProvider) || 'openai')
+        setAgentBackend((llm.agent_backend as AgentBackend) || (llm.provider === 'codex' ? 'codex' : 'direct'))
+        setLlmProvider((llm.provider as ModelProvider) === 'deepseek' || (llm.provider as ModelProvider) === 'ollama' ? llm.provider : 'openai')
         setLlmForm({
           codex: {
             model: llm.codex?.model || '',
             timeout_seconds: llm.codex?.timeout_seconds || 600,
+          },
+          pi: {
+            timeout_seconds: llm.pi?.timeout_seconds || 600,
           },
           openai: {
             model: llm.openai?.model || '',
@@ -200,15 +205,13 @@ export default function SettingsPage() {
   const handleSaveKeywords = async () => {
     setSavingKw(true)
     try {
-      const res = await updateKeywords(keywords, regions, serperKey.trim() || undefined)
-      setSerperKey('')
+      await updateKeywords(keywords, regions)
       setSettings((prev: any) => ({
         ...prev,
         search: {
           ...prev?.search,
           keywords,
           regions,
-          serper_api_key_set: Boolean(res.data?.serper_api_key_set),
         },
       }))
       setSavedKw(true)
@@ -256,15 +259,18 @@ export default function SettingsPage() {
   const handleSaveLlm = async () => {
     setSavingLlm(true)
     try {
-      const payload: any = { provider: llmProvider }
-      if (llmProvider === 'codex') {
+      const payload: any = { agent_backend: agentBackend, provider: llmProvider }
+      if (agentBackend === 'codex') {
         payload.codex = {
           model: llmForm.codex.model,
           timeout_seconds: llmForm.codex.timeout_seconds,
         }
-      } else if (llmProvider === 'ollama') {
+      } else if (agentBackend === 'pi') {
+        payload.pi = { timeout_seconds: llmForm.pi.timeout_seconds }
+      }
+      if (agentBackend !== 'codex' && llmProvider === 'ollama') {
         payload.ollama = { model: llmForm.ollama.model, base_url: llmForm.ollama.base_url }
-      } else {
+      } else if (agentBackend !== 'codex' && (llmProvider === 'openai' || llmProvider === 'deepseek')) {
         const sub = llmForm[llmProvider]
         payload[llmProvider] = {
           model: sub.model,
@@ -387,15 +393,15 @@ export default function SettingsPage() {
                 <span>搜索 Agent</span>
               </div>
               <p className="mt-1 text-xs text-gray-400">
-                {settings.search?.effective_provider === 'codex' ? 'Codex SDK' : 'Serper'}
+                {settings.search?.agent_backend === 'pi' ? 'Pi Harness' : settings.search?.agent_backend === 'codex' ? 'Codex Harness' : '未选择 Harness'}
               </p>
               <p className="mt-1 font-medium">
-                {settings.search?.effective_provider === 'codex' && settings.search?.codex?.available ? (
+                {settings.search?.agent_backend === 'codex' && settings.search?.codex?.available ? (
                   <span className="text-green-600">已连接</span>
-                ) : settings.search?.effective_provider === 'codex' ? (
+                ) : settings.search?.agent_backend === 'pi' && settings.search?.pi?.available ? (
+                  <span className="text-green-600">已连接</span>
+                ) : settings.search?.agent_backend === 'codex' || settings.search?.agent_backend === 'pi' ? (
                   <span className="text-red-500">Worker 未运行</span>
-                ) : settings.search?.serper_api_key_set ? (
-                  <span className="text-green-600">已配置</span>
                 ) : (
                   <span className="text-red-500">未配置</span>
                 )}
@@ -431,12 +437,12 @@ export default function SettingsPage() {
         </div>
       )}
 
-      {/* LLM 后端配置 */}
+      {/* Agent 执行引擎与模型 API */}
       <div className="rounded-xl bg-white p-6 shadow-sm border border-gray-100">
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-2">
             <Cpu className="h-5 w-5 text-indigo-500" />
-            <h3 className="text-lg font-semibold text-gray-800">LLM 后端配置</h3>
+            <h3 className="text-lg font-semibold text-gray-800">Agent 执行引擎与模型 API</h3>
           </div>
           <button
             onClick={handleSaveLlm}
@@ -449,26 +455,26 @@ export default function SettingsPage() {
         </div>
 
         <div className="mb-5">
-          <label className="block text-sm font-medium text-gray-700 mb-1.5">Provider</label>
-          <p className="text-xs text-gray-400 mb-2">切换邮件生成、Profile、研究分析和信息提取使用的全局后端</p>
+          <label className="block text-sm font-medium text-gray-700 mb-1.5">执行引擎</label>
+          <p className="text-xs text-gray-400 mb-2">决定搜索、补全、研究、邮件和 Profile 是否经过任务 Harness</p>
           <div className="flex flex-wrap gap-2">
-            {(['codex', 'openai', 'deepseek', 'ollama'] as LlmProvider[]).map((p) => (
+            {(['direct', 'pi', 'codex'] as AgentBackend[]).map((backend) => (
               <button
-                key={p}
-                onClick={() => setLlmProvider(p)}
+                key={backend}
+                onClick={() => setAgentBackend(backend)}
                 className={`rounded-lg border px-4 py-2 text-sm font-medium transition-colors ${
-                  llmProvider === p
+                  agentBackend === backend
                     ? 'border-indigo-500 bg-indigo-50 text-indigo-700'
                     : 'border-gray-200 text-gray-600 hover:bg-gray-50'
                 }`}
               >
-                {p === 'codex' ? 'Codex App Server' : p === 'openai' ? 'OpenAI 兼容' : p === 'deepseek' ? 'DeepSeek' : 'Ollama (本地)'}
+                {backend === 'direct' ? 'Direct API' : backend === 'pi' ? 'Pi Harness' : 'Codex App Server'}
               </button>
             ))}
           </div>
         </div>
 
-        {llmProvider === 'codex' && (
+        {agentBackend === 'codex' && (
           <div className="space-y-3">
             <div className={`flex items-center gap-2 rounded-lg border px-3 py-2 text-sm ${
               settings?.llm?.codex?.available
@@ -517,7 +523,60 @@ export default function SettingsPage() {
           </div>
         )}
 
-        {(llmProvider === 'openai' || llmProvider === 'deepseek') && (
+        {agentBackend === 'pi' && (
+          <div className="mb-5 space-y-3">
+            <div className={`flex items-center gap-2 rounded-lg border px-3 py-2 text-sm ${
+              settings?.llm?.pi?.available
+                ? 'border-green-200 bg-green-50 text-green-700'
+                : 'border-red-200 bg-red-50 text-red-700'
+            }`}>
+              {settings?.llm?.pi?.available ? <CheckCircle2 className="h-4 w-4" /> : <AlertCircle className="h-4 w-4" />}
+              {settings?.llm?.pi?.available
+                ? `Pi Worker 已连接${settings?.llm?.pi?.version ? `（${settings.llm.pi.version}）` : ''}`
+                : 'Pi Worker 未运行，保存配置后仍需启动 Worker'}
+            </div>
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">任务超时（秒）</label>
+              <input
+                type="number"
+                min={30}
+                max={1800}
+                value={llmForm.pi.timeout_seconds}
+                onChange={(e) => setLlmForm({
+                  ...llmForm,
+                  pi: { timeout_seconds: Math.max(30, Number(e.target.value) || 600) },
+                })}
+                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+              />
+            </div>
+          </div>
+        )}
+
+        {agentBackend !== 'codex' && (
+          <div className="mb-5 border-t border-gray-100 pt-5">
+            <label className="block text-sm font-medium text-gray-700 mb-1.5">模型 API</label>
+            <p className="text-xs text-gray-400 mb-2">
+              {agentBackend === 'pi' ? 'Pi Harness 将通过这里选择的 API 调用模型' : '后端直接调用这里选择的 API'}
+            </p>
+            <div className="flex flex-wrap gap-2">
+              {(['openai', 'deepseek', 'ollama'] as ModelProvider[]).map((provider) => (
+                <button
+                  key={provider}
+                  onClick={() => setLlmProvider(provider)}
+                  className={`rounded-lg border px-4 py-2 text-sm font-medium transition-colors ${
+                    llmProvider === provider
+                      ? 'border-indigo-500 bg-indigo-50 text-indigo-700'
+                      : 'border-gray-200 text-gray-600 hover:bg-gray-50'
+                  }`}
+                >
+                  {provider === 'openai' ? 'OpenAI 兼容' : provider === 'deepseek' ? 'DeepSeek' : 'Ollama (本地)'}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {agentBackend !== 'codex' && (llmProvider === 'openai' || llmProvider === 'deepseek') && (
           <div className="space-y-3">
             <div>
               <label className="block text-xs text-gray-500 mb-1">Model</label>
@@ -564,7 +623,7 @@ export default function SettingsPage() {
           </div>
         )}
 
-        {llmProvider === 'ollama' && (
+        {agentBackend !== 'codex' && llmProvider === 'ollama' && (
           <div className="space-y-3">
             <div>
               <label className="block text-xs text-gray-500 mb-1">Model</label>
@@ -740,30 +799,6 @@ export default function SettingsPage() {
           </button>
         </div>
 
-        <div className="mb-5">
-          <label className="block text-sm font-medium text-gray-700 mb-1.5">Serper API Key</label>
-          <p className="text-xs text-gray-400 mb-2">
-            仅供 Serper 模式或 Codex 回退使用。{settings?.search?.serper_api_key_set ? '已配置，留空会保留当前 Key。' : '当前尚未配置。'}
-          </p>
-          <div className="relative">
-            <input
-              type={showSerperKey ? 'text' : 'password'}
-              autoComplete="new-password"
-              value={serperKey}
-              onChange={(e) => setSerperKey(e.target.value)}
-              placeholder={settings?.search?.serper_api_key_set ? '输入新 Key 以替换当前配置' : '输入 Serper API Key'}
-              className="w-full rounded-lg border border-gray-300 px-3 py-2 pr-10 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
-            />
-            <button
-              onClick={() => setShowSerperKey(!showSerperKey)}
-              className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
-              title={showSerperKey ? '隐藏 API Key' : '显示 API Key'}
-            >
-              {showSerperKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-            </button>
-          </div>
-        </div>
-
         {/* 关键词 */}
         <p className="text-sm text-gray-500 mb-2">研究方向关键词（用于自动搜索导师）</p>
         <div className="flex flex-wrap gap-2 mb-3">
@@ -894,7 +929,7 @@ export default function SettingsPage() {
               value={promptForm.compose_extra_en}
               onChange={(e) => setPromptForm({ ...promptForm, compose_extra_en: e.target.value })}
               rows={3}
-              placeholder="e.g., Mention my ICPC gold medal; Don't mention GPA"
+              placeholder="e.g., Mention my research internship; do not mention GPA"
               className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
             />
           </div>
@@ -1185,7 +1220,7 @@ export default function SettingsPage() {
                   onChange={(e) => setGenPitch(e.target.value)}
                   rows={6}
                   disabled={generating}
-                  placeholder="例：PhD 阶段想聚焦在 LLM-for-Optimization 这一条线，不太想做纯组合优化的求解器侧；目标地区中国 / 香港 / 新加坡；不要联系做纯 CV / 系统的导师；可以提一下我的 ICPC 背景作为算法功底信号。"
+                  placeholder="例：博士阶段希望继续研究可靠机器学习；目标地区为中国 / 香港 / 新加坡；不考虑纯系统方向；可以突出与目标方向相关的研究实习。"
                   className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 disabled:bg-gray-50"
                 />
               </div>

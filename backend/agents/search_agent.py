@@ -14,19 +14,25 @@ import time
 from typing import Any, AsyncGenerator, Awaitable, Callable, Optional
 
 import httpx
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import tool
 
-from backend.core.llm import get_llm, load_yaml_config, load_profile
-from backend.core.codex_llm import codex_invoke_options, is_codex_llm
+from backend.core.llm import (
+    get_llm,
+    get_model_api_config,
+    load_yaml_config,
+    load_profile,
+    resolve_agent_backend,
+)
+from backend.core.agent_llm import agent_invoke_options, is_harness_llm
 from backend.core.prompts import load_prompt
-from backend.core.serper import SerperAPIError, search_serper as request_serper
-from backend.core.codex_client import CodexWorkerError, stream_codex_task
+from backend.core.agent_client import stream_agent_task
+from backend.core.codex_client import CodexWorkerError
+from backend.core.pi_client import PiWorkerError
 from backend.core import database as db
 
 logger = logging.getLogger(__name__)
 
-MAX_TOOL_ROUNDS = 25
 CS_RANKINGS_CACHE_TTL_SECONDS = 6 * 60 * 60
 CS_RANKINGS_FACULTY_URLS = (
     "https://csrankings.org/csrankings.csv",
@@ -123,32 +129,11 @@ REGION_ALIASES = {
 
 # ── Agent 共享状态（每次运行时设置）─────────────────────
 
-_serper_key: str = ""
 _progress_queue: Optional[asyncio.Queue] = None
 _csrankings_cache: dict[str, Any] = {"loaded_at": 0.0, "faculty": None, "institutions": None}
 
 
 # ── Tool 定义 ──────────────────────────────────────────
-
-@tool
-async def search_google(query: str) -> str:
-    """Search Google for academic information. Use English queries by default; use Chinese terms only to verify accurate Chinese names for mainland China professors. Returns titles, snippets, and links for professor homepages, publications, and contact info."""
-    global _serper_key, _progress_queue
-    if _progress_queue:
-        await _progress_queue.put({"type": "progress", "message": f"🔍 搜索: {query}"})
-    try:
-        results = await search_serper(query, _serper_key, num=10)
-    except SerperAPIError:
-        raise
-    except Exception as e:
-        return f"搜索出错: {e}"
-    if not results:
-        return "No results found."
-    return "\n\n".join(
-        f"Title: {r.get('title','')}\nSnippet: {r.get('snippet','')}\nLink: {r.get('link','')}"
-        for r in results[:10]
-    )
-
 
 @tool
 async def search_csrankings(
@@ -184,7 +169,7 @@ async def search_csrankings(
     try:
         faculty_rows, institution_map, source_url = await _load_csrankings_data()
     except Exception as e:
-        return f"CSRankings fetch failed: {e}. Fall back to search_google."
+        return f"CSRankings fetch failed: {e}. Continue with the Harness web search."
 
     existing = await db.get_professors()
     blacklist = await db.get_blacklist()
@@ -497,129 +482,6 @@ def _round_robin_by_university(candidates: list[dict[str, Any]], limit: int) -> 
     return selected
 
 
-async def _candidate_enrichment_search(
-    name: str,
-    university: str,
-    department: str = "",
-    research_hint: str = "",
-    region: str = "",
-) -> dict:
-    """Search contact/Scholar/homepage signals and ask the enrichment prompt to extract fields."""
-    global _serper_key, _progress_queue
-
-    query_bits = [name, university]
-    if department:
-        query_bits.append(department)
-    base = " ".join(f'"{bit}"' for bit in query_bits if bit)
-    loose_base = " ".join(bit for bit in query_bits if bit)
-    queries = [
-        f"{base} email",
-        f"{base} contact",
-        f"{base} professor homepage",
-        f"{base} site:scholar.google.com/citations",
-        f"{base} Google Scholar citations",
-    ]
-    if _is_mainland_china(region, university):
-        queries = [
-            f"{base} 中文名 教授",
-            f"{base} 个人主页 教授",
-            f"{base} 简历 学者",
-            f"{base} site:edu.cn 教授",
-            *queries,
-        ]
-    if research_hint:
-        queries.append(f"{loose_base} {research_hint} recent papers")
-
-    if _progress_queue:
-        await _progress_queue.put({"type": "progress", "message": f"🧭 补全候选人: {name} @ {university}"})
-
-    all_results = []
-    for q in queries:
-        if _progress_queue:
-            await _progress_queue.put({"type": "progress", "message": f"🔍 补全搜索: {q}"})
-        try:
-            all_results.extend(await search_serper(q, _serper_key, num=6))
-        except SerperAPIError:
-            raise
-        except Exception as e:
-            logger.warning(f"Candidate enrichment search failed for '{q}': {e}")
-        await asyncio.sleep(0.2)
-
-    seen = set()
-    unique = []
-    for r in all_results:
-        link = r.get("link", "")
-        if link and link not in seen:
-            seen.add(link)
-            unique.append(r)
-
-    if not unique:
-        return {}
-
-    search_text = "\n\n".join(
-        f"Title: {r.get('title', '')}\nSnippet: {r.get('snippet', '')}\nLink: {r.get('link', '')}"
-        for r in unique[:18]
-    )
-    known_info = f"姓名: {name}\n学校: {university}"
-    if department:
-        known_info += f"\n院系: {department}"
-    if region:
-        known_info += f"\n地区: {region}"
-    if research_hint:
-        known_info += f"\n研究方向线索: {research_hint}"
-
-    try:
-        llm = get_llm()
-        resp = await llm.ainvoke([
-            SystemMessage(content=load_prompt("enrich_professor")),
-            HumanMessage(content=f"已知信息:\n{known_info}\n\n搜索结果:\n{search_text}\n\n请补全这位导师的信息。"),
-        ], **codex_invoke_options(
-            llm,
-            "enrich",
-            _enrich_output_schema(),
-        ))
-        enriched = _parse_json_response(resp.content)
-    except Exception as e:
-        logger.warning(f"Candidate enrichment LLM failed for {name} @ {university}: {e}")
-        return {}
-
-    if not isinstance(enriched, dict):
-        return {}
-    email = _normalize_email(enriched.get("email"))
-    enriched["email"] = email or None
-    return enriched
-
-
-@tool
-async def enrich_candidate_info(
-    name: str,
-    university: str,
-    department: str = "",
-    research_hint: str = "",
-    region: str = "",
-) -> str:
-    """Before saving a professor, search for verified name, email, homepage, Google Scholar, department, recent papers, region, and tags. Convert anti-crawler email forms like name {at} uni {dot} edu to standard email addresses. Also marks candidates that are already in the local database so you can skip them and search for new professors. Mainland China professors need accurate Chinese names; all other regions should use English/romanized names. Returns JSON. Do not fabricate missing fields."""
-    if not name or not university:
-        return "Error: name and university are required."
-    enriched = await _candidate_enrichment_search(name, university, department, research_hint, region)
-    candidate = {
-        "name": enriched.get("name") or name,
-        "university": university,
-        "email": enriched.get("email") or "",
-        "homepage": enriched.get("homepage") or "",
-        "google_scholar": enriched.get("google_scholar") or "",
-    }
-    match = await db.find_existing_professor_match(candidate)
-    if match:
-        existing = match["professor"]
-        enriched["_already_in_database"] = True
-        enriched["_existing_id"] = existing.get("id")
-        enriched["_existing_name"] = existing.get("name")
-        enriched["_existing_university"] = existing.get("university")
-        enriched["_match_reason"] = match.get("reason")
-    return json.dumps(enriched, ensure_ascii=False)
-
-
 @tool
 async def check_professor_exists(
     name: str,
@@ -661,10 +523,11 @@ async def save_professor(
     google_scholar: str = "",
     research_summary: str = "",
     recent_papers: str = "",
+    recommended_papers: str = "[]",
     region: str = "",
     tags: str = "[]",
 ) -> str:
-    """Save a professor to the database. Required: name, university. Email may be a standard address or an anti-crawler form like name {at} uni {dot} edu, which will be normalized. For mainland China professors, name must be the accurate Chinese name; for other regions, use English/romanized name. Optional: email, department, homepage, google_scholar, research_summary, recent_papers, region, tags. Do NOT fabricate info."""
+    """Save a professor to the database. Required: name, university. Email may be a standard address or an anti-crawler form like name {at} uni {dot} edu, which will be normalized. For mainland China professors, name must be the accurate Chinese name; for other regions, use English/romanized name. Optional: email, department, homepage, google_scholar, research_summary, recent_papers, recommended_papers JSON, region, tags. Do NOT fabricate info."""
     global _progress_queue
     if not name or not university:
         return "Error: name and university are required."
@@ -674,41 +537,6 @@ async def save_professor(
         if _progress_queue:
             await _progress_queue.put({"type": "progress", "message": f"⛔ 跳过（黑名单）: {name} @ {university}"})
         return f"Skipped: {name} @ {university} is on the user's blacklist. Do NOT try to save this professor again — pick a different one."
-
-    mainland_candidate = _is_mainland_china(region, university)
-    needs_enrichment = (
-        not _valid_email(email)
-        or not homepage
-        or not google_scholar
-        or not recent_papers
-        or not research_summary
-        or (mainland_candidate and not _has_cjk(name))
-        or (not mainland_candidate and _has_cjk(name))
-    )
-    if needs_enrichment and _serper_key:
-        enriched = await _candidate_enrichment_search(
-            name=name,
-            university=university,
-            department=department,
-            research_hint=research_summary,
-            region=region,
-        )
-        enriched_name = (enriched.get("name") or "").strip()
-        mainland_enriched = _is_mainland_china(region or enriched.get("region") or "", university)
-        if enriched_name:
-            if mainland_enriched and _has_cjk(enriched_name):
-                name = enriched_name
-            elif not mainland_enriched and not _has_cjk(enriched_name):
-                name = enriched_name
-        email = email or _normalize_email(enriched.get("email"))
-        department = department or enriched.get("department") or ""
-        homepage = homepage or enriched.get("homepage") or ""
-        google_scholar = google_scholar or enriched.get("google_scholar") or ""
-        research_summary = research_summary or enriched.get("research_summary") or ""
-        recent_papers = recent_papers or enriched.get("recent_papers") or ""
-        region = region or enriched.get("region") or ""
-        if (not tags or tags == "[]") and enriched.get("tags"):
-            tags = json.dumps(enriched["tags"], ensure_ascii=False)
 
     if _is_mainland_china(region, university) and not _has_cjk(name):
         msg = (
@@ -729,10 +557,10 @@ async def save_professor(
         "department": department, "homepage": homepage,
         "google_scholar": google_scholar,
         "research_summary": research_summary, "recent_papers": recent_papers,
+        "recommended_papers": _serialize_recommended_papers(recommended_papers),
         "region": region, "source": "auto",
+        "tags": _new_professor_tags(tags),
     }
-    if tags and tags != "[]":
-        prof_data["tags"] = tags
 
     match = await db.find_existing_professor_match(prof_data)
     if match:
@@ -835,12 +663,6 @@ def _build_search_system_prompt() -> str:
 
 # ── 共用工具函数 ──────────────────────────────────────
 
-async def search_serper(query: str, api_key: str, num: int = 10) -> list[dict]:
-    """调用 Serper API 进行 Google 搜索"""
-    return await request_serper(query, api_key, num=num)
-
-
-
 def _parse_json_response(content: str) -> any:
     """解析 LLM 返回的 JSON（处理 markdown 代码块包裹）"""
     content = content.strip()
@@ -848,6 +670,126 @@ def _parse_json_response(content: str) -> any:
         content = content.split("\n", 1)[1]
         content = content.rsplit("```", 1)[0].strip()
     return json.loads(content)
+
+
+def _new_professor_tags(raw: Any) -> str:
+    if isinstance(raw, list):
+        tags = [str(tag).strip() for tag in raw if str(tag).strip()]
+    elif isinstance(raw, str) and raw.strip():
+        try:
+            parsed = json.loads(raw)
+            tags = (
+                [str(tag).strip() for tag in parsed if str(tag).strip()]
+                if isinstance(parsed, list)
+                else []
+            )
+        except json.JSONDecodeError:
+            tags = []
+    else:
+        tags = []
+    return json.dumps(list(dict.fromkeys(["新", *tags])), ensure_ascii=False)
+
+
+def _recommended_paper_schema() -> dict[str, Any]:
+    nullable_integer = {"anyOf": [{"type": "integer"}, {"type": "null"}]}
+    return {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},
+            "venue": {"type": "string"},
+            "year": nullable_integer,
+            "citation_count": nullable_integer,
+            "url": {"type": "string"},
+            "why_recommended": {"type": "string"},
+        },
+        "required": [
+            "title",
+            "venue",
+            "year",
+            "citation_count",
+            "url",
+            "why_recommended",
+        ],
+        "additionalProperties": False,
+    }
+
+
+def _normalize_recommended_papers(raw: Any) -> list[dict[str, Any]]:
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            return []
+    if not isinstance(raw, list):
+        return []
+
+    papers: list[dict[str, Any]] = []
+    seen_titles: set[str] = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "").strip()
+        url = str(item.get("url") or "").strip()
+        reason = str(item.get("why_recommended") or "").strip()
+        title_key = re.sub(r"\W+", "", title.lower())
+        if (
+            not title
+            or not title_key
+            or title_key in seen_titles
+            or not url.startswith(("https://", "http://"))
+            or not reason
+        ):
+            continue
+
+        def optional_int(value: Any, minimum: int, maximum: int) -> int | None:
+            if value is None or isinstance(value, bool):
+                return None
+            if isinstance(value, str):
+                match = re.search(r"\d[\d,]*", value)
+                if not match:
+                    return None
+                value = match.group(0).replace(",", "")
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError):
+                return None
+            return parsed if minimum <= parsed <= maximum else None
+
+        seen_titles.add(title_key)
+        papers.append({
+            "title": title[:500],
+            "venue": str(item.get("venue") or "").strip()[:160],
+            "year": optional_int(item.get("year"), 1900, 2100),
+            "citation_count": optional_int(
+                item.get("citation_count"),
+                0,
+                10_000_000,
+            ),
+            "url": url[:2048],
+            "why_recommended": reason[:1000],
+        })
+        if len(papers) >= 5:
+            break
+    return papers
+
+
+def _serialize_recommended_papers(raw: Any) -> str:
+    return json.dumps(_normalize_recommended_papers(raw), ensure_ascii=False)
+
+
+def _applicant_recommendation_context() -> str:
+    cfg = load_yaml_config()
+    search_cfg = cfg.get("search", {}) or {}
+    prompt_cfg = cfg.get("prompts", {}) or {}
+    keywords = search_cfg.get("keywords", []) or []
+    preference = str(prompt_cfg.get("search_preference") or "").strip()
+    profile = load_profile().strip()
+    return (
+        "申请者研究背景与申请需求（仅用于选择推荐论文，不得据此虚构导师信息）：\n"
+        f"目标方向: {', '.join(str(value) for value in keywords) or '(未单独配置)'}\n"
+        f"搜索偏好: {preference or '(未单独配置)'}\n"
+        f"Profile:\n{profile[:6000] or '(未配置)'}"
+    )
 
 
 def _enrich_output_schema() -> dict[str, Any]:
@@ -862,6 +804,10 @@ def _enrich_output_schema() -> dict[str, Any]:
             "google_scholar": nullable_string,
             "research_summary": nullable_string,
             "recent_papers": nullable_string,
+            "recommended_papers": {
+                "type": "array",
+                "items": _recommended_paper_schema(),
+            },
             "region": nullable_string,
             "tags": {"type": "array", "items": {"type": "string"}},
         },
@@ -873,11 +819,73 @@ def _enrich_output_schema() -> dict[str, Any]:
             "google_scholar",
             "research_summary",
             "recent_papers",
+            "recommended_papers",
             "region",
             "tags",
         ],
         "additionalProperties": False,
     }
+
+
+def _recommend_papers_output_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "recommended_papers": {
+                "type": "array",
+                "items": _recommended_paper_schema(),
+            },
+        },
+        "required": ["recommended_papers"],
+        "additionalProperties": False,
+    }
+
+
+async def _recommend_papers_for_professor(
+    prof: dict,
+    llm,
+    emit: Callable[[str], Awaitable[None]],
+) -> list[dict[str, Any]]:
+    name = str(prof.get("name") or "").strip()
+    university = str(prof.get("university") or "").strip()
+    research = str(prof.get("research_summary") or "").strip()
+    known_info = (
+        f"导师: {name}\n学校: {university}\n"
+        f"研究方向: {research or '(待核验)'}\n"
+        f"主页: {prof.get('homepage') or '(未知)'}\n"
+        f"Google Scholar: {prof.get('google_scholar') or '(未知)'}\n"
+        f"已有论文线索: {prof.get('recent_papers') or '(未知)'}"
+    )
+    applicant_context = _applicant_recommendation_context()
+
+    if not is_harness_llm(llm):
+        return []
+    evidence = (
+        "请使用实时网页搜索核验论文标题、作者关系、来源链接和明确被引数。"
+        "优先检查导师主页、Google Scholar 和正式论文页面。"
+    )
+
+    try:
+        response = await llm.ainvoke([
+            SystemMessage(content=load_prompt("recommend_papers")),
+            HumanMessage(content=(
+                f"导师信息:\n{known_info}\n\n"
+                f"{applicant_context}\n\n"
+                f"公开证据与检索要求:\n{evidence}"
+            )),
+        ], **agent_invoke_options(
+            llm,
+            "research",
+            _recommend_papers_output_schema(),
+        ))
+        data = _parse_json_response(response.content)
+        return _normalize_recommended_papers(
+            data.get("recommended_papers") if isinstance(data, dict) else []
+        )
+    except Exception as exc:
+        logger.warning("Dedicated paper recommendation failed for %s: %s", name, exc)
+        await emit(f"推荐论文生成失败：{exc}")
+        return []
 
 
 # ── 单个导师信息补全 ──────────────────────────────────
@@ -898,16 +906,10 @@ async def enrich_professor(
     if not prof:
         return {"success": False, "message": "导师不存在"}
 
-    cfg = load_yaml_config()
-    search_cfg = cfg.get("search", {})
-    serper_key = search_cfg.get("serper_api_key", "")
     llm = get_llm()
-    codex_mode = is_codex_llm(llm)
-    if (
-        not codex_mode
-        and (not serper_key or serper_key == "your-serper-api-key")
-    ):
-        return {"success": False, "message": "请先配置 Serper API Key"}
+    harness_mode = is_harness_llm(llm)
+    if not harness_mode:
+        return {"success": False, "message": "导师补全需要 Codex 或 Pi Harness"}
 
     name = prof["name"]
     university = prof["university"]
@@ -924,82 +926,22 @@ async def enrich_professor(
         known_info += f"\n主页: {prof['homepage']}"
     if prof.get("google_scholar"):
         known_info += f"\nGoogle Scholar: {prof['google_scholar']}"
+    applicant_context = _applicant_recommendation_context()
 
     try:
-        if codex_mode:
-            await emit("Codex 正在实时搜索并核验公开学术信息")
-            user_content = (
-                f"已知信息:\n{known_info}\n\n"
-                "请使用实时网页搜索补全这位导师的信息。优先核验学校官网、"
-                "个人主页和 Google Scholar，并遵守中国大陆中文名规则。"
-            )
-        else:
-            queries = [
-                f"{name} {university} professor homepage",
-                f"{name} {university} {department} research email",
-                f'"{name}" "{university}" google scholar',
-            ]
-            if _is_mainland_china(region, university):
-                queries = [
-                    f'"{name}" "{university}" 中文名 教授',
-                    f'"{name}" "{university}" 个人主页 教授',
-                    f'"{name}" "{university}" 简历 学者',
-                    *queries,
-                ]
-
-            all_results = []
-            for query in queries:
-                await emit(f"搜索：{query}")
-                try:
-                    all_results.extend(
-                        await search_serper(query, serper_key, num=8)
-                    )
-                except SerperAPIError as exc:
-                    logger.warning(
-                        "Serper unavailable while enriching %s: %s",
-                        name,
-                        exc,
-                    )
-                    await emit(str(exc))
-                    return {"success": False, "message": str(exc)}
-                except Exception as exc:
-                    logger.warning(
-                        "Enrich search failed for '%s': %s",
-                        query,
-                        exc,
-                    )
-                    await emit(f"搜索失败：{query} ({exc})")
-                await asyncio.sleep(0.3)
-
-            if not all_results:
-                await emit("未搜索到任何结果")
-                return {"success": False, "message": "未搜索到任何结果"}
-
-            seen = set()
-            unique = []
-            for result in all_results:
-                link = result.get("link", "")
-                if link and link not in seen:
-                    seen.add(link)
-                    unique.append(result)
-            search_text = "\n\n".join(
-                f"Title: {item.get('title', '')}\n"
-                f"Snippet: {item.get('snippet', '')}\n"
-                f"Link: {item.get('link', '')}"
-                for item in unique[:15]
-            )
-            await emit(
-                f"搜索完成：去重后 {len(unique)} 条结果，开始提取字段"
-            )
-            user_content = (
-                f"已知信息:\n{known_info}\n\n搜索结果:\n{search_text}\n\n"
-                "请补全这位导师的信息。"
-            )
+        await emit("Agent Harness 正在实时搜索并核验公开学术信息")
+        user_content = (
+            f"已知信息:\n{known_info}\n\n{applicant_context}\n\n"
+            "请使用实时网页搜索补全这位导师的信息。优先核验学校官网、"
+            "个人主页和 Google Scholar，并遵守中国大陆中文名规则。"
+            "另外推荐 3-5 篇与申请者方向自然相关且较有代表性的真实论文；"
+            "相关性相近时优先选择明确被引更高的工作。"
+        )
 
         resp = await llm.ainvoke([
             SystemMessage(content=load_prompt("enrich_professor")),
             HumanMessage(content=user_content),
-        ], **codex_invoke_options(
+        ], **agent_invoke_options(
             llm,
             "enrich",
             _enrich_output_schema(),
@@ -1009,6 +951,22 @@ async def enrich_professor(
         logger.error(f"Enrich LLM failed: {e}")
         await emit(f"LLM 分析失败：{e}")
         return {"success": False, "message": f"LLM 分析失败: {e}"}
+
+    recommendations = _normalize_recommended_papers(
+        enriched.get("recommended_papers")
+    )
+    existing_recommendations = _normalize_recommended_papers(
+        prof.get("recommended_papers")
+    )
+    if not recommendations and not existing_recommendations:
+        await emit("常规补全未返回推荐论文，启动专项论文推荐")
+        recommendations = await _recommend_papers_for_professor(
+            {**prof, **enriched},
+            llm,
+            emit,
+        )
+    if recommendations:
+        enriched["recommended_papers"] = recommendations
 
     # 构建更新字段
     # email: 只在原值为空 / 占位邮箱时才覆盖（保护用户手动改过的真实邮箱）
@@ -1037,6 +995,15 @@ async def enrich_professor(
         if new_val:
             update_data[field] = new_val
 
+    recommended_papers = _normalize_recommended_papers(
+        enriched.get("recommended_papers")
+    )
+    if recommended_papers:
+        update_data["recommended_papers"] = json.dumps(
+            recommended_papers,
+            ensure_ascii=False,
+        )
+
     # tags: 合并已有 + 新发现的
     new_tags = enriched.get("tags", [])
     if isinstance(new_tags, list) and new_tags:
@@ -1058,113 +1025,7 @@ async def enrich_professor(
     return {"success": True, "updated_fields": list(update_data.keys())}
 
 
-# ── 主流程：Agent Tool-Calling Loop ──────────────────────
-
-async def _search_professors_legacy(
-    keywords: Optional[list[str]] = None,
-    regions: Optional[list[str]] = None,
-    max_results: int = 20,
-) -> AsyncGenerator[dict, None]:
-    """
-    LLM 自主 Tool Calling 驱动的导师搜索（异步生成器）。
-
-    LLM 自主决定何时搜索、搜什么、保存谁，通过 Tool Calling 与外部工具交互。
-
-    yield 的消息格式:
-      {"type": "progress", "message": "..."}
-      {"type": "professor", "data": {...}}
-      {"type": "done", "total": N}
-      {"type": "error", "message": "..."}
-    """
-    global _serper_key, _progress_queue
-
-    cfg = load_yaml_config()
-    search_cfg = cfg.get("search", {})
-    _serper_key = search_cfg.get("serper_api_key", "")
-
-    if not _serper_key or _serper_key == "your-serper-api-key":
-        yield {"type": "error", "message": "请先在 config.yaml 中配置 Serper API Key"}
-        return
-
-    _progress_queue = asyncio.Queue()
-
-    try:
-        llm = get_llm()
-        tools = [
-            search_csrankings,
-            search_google,
-            enrich_candidate_info,
-            check_professor_exists,
-            save_professor,
-            get_existing_professors,
-            get_user_profile,
-        ]
-        llm_with_tools = llm.bind_tools(tools)
-        tool_map = {t.name: t for t in tools}
-
-        runtime_requirements = []
-        if keywords:
-            runtime_requirements.append(f"本次搜索关键词: {', '.join(keywords)}")
-        if regions:
-            runtime_requirements.append(f"本次目标地区: {', '.join(regions)}")
-        runtime_extra = ("\n" + "\n".join(runtime_requirements)) if runtime_requirements else ""
-
-        messages = [
-            SystemMessage(content=_build_search_system_prompt()),
-            HumanMessage(content=f"请开始搜索导师，目标找到约 {max_results} 位匹配的新导师。{runtime_extra}"),
-        ]
-
-        yield {"type": "progress", "message": "🤖 Agent 已启动，正在自主规划搜索策略..."}
-
-        for round_num in range(MAX_TOOL_ROUNDS):
-            try:
-                response = await llm_with_tools.ainvoke(messages)
-            except Exception as e:
-                yield {"type": "error", "message": f"Agent LLM 调用失败: {e}"}
-                return
-
-            messages.append(response)
-
-            # If LLM returns no tool calls → agent is done
-            if not response.tool_calls:
-                if response.content:
-                    yield {"type": "progress", "message": f"🤖 Agent 总结:\n{response.content}"}
-                break
-
-            # Execute each tool call
-            for tc in response.tool_calls:
-                tool_name = tc["name"]
-                tool_args = tc["args"]
-
-                yield {"type": "progress", "message": f"⚡ 调用工具: {tool_name}"}
-
-                fn = tool_map.get(tool_name)
-                if fn:
-                    try:
-                        result = await fn.ainvoke(tool_args)
-                    except SerperAPIError as e:
-                        while not _progress_queue.empty():
-                            yield await _progress_queue.get()
-                        yield {"type": "error", "message": str(e)}
-                        return
-                    except Exception as e:
-                        result = f"工具执行出错: {e}"
-                else:
-                    result = f"未知工具: {tool_name}"
-
-                messages.append(ToolMessage(content=str(result), tool_call_id=tc["id"]))
-
-                # Drain progress queue (tools push messages here)
-                while not _progress_queue.empty():
-                    yield await _progress_queue.get()
-
-            await asyncio.sleep(0.3)
-
-        all_profs = await db.get_professors()
-        yield {"type": "done", "total": len(all_profs)}
-    finally:
-        _progress_queue = None
-
+# ── 主流程：Codex/Pi Harness 搜索 ──────────────────────
 
 def _codex_search_output_schema() -> dict[str, Any]:
     candidate = {
@@ -1178,6 +1039,10 @@ def _codex_search_output_schema() -> dict[str, Any]:
             "google_scholar": {"type": "string"},
             "research_summary": {"type": "string"},
             "recent_papers": {"type": "string"},
+            "recommended_papers": {
+                "type": "array",
+                "items": _recommended_paper_schema(),
+            },
             "region": {"type": "string"},
             "tags": {"type": "array", "items": {"type": "string"}},
             "sources": {"type": "array", "items": {"type": "string"}},
@@ -1191,6 +1056,7 @@ def _codex_search_output_schema() -> dict[str, Any]:
             "google_scholar",
             "research_summary",
             "recent_papers",
+            "recommended_papers",
             "region",
             "tags",
             "sources",
@@ -1210,28 +1076,58 @@ def _codex_search_output_schema() -> dict[str, Any]:
 
 def _compact_professor_index(professors: list[dict], blacklist: list[dict]) -> str:
     lines = []
-    for prof in professors[:500]:
-        identities = [
-            str(prof.get("name") or "").strip(),
-            str(prof.get("university") or "").strip(),
-            _normalize_email(prof.get("email")),
-            str(prof.get("homepage") or "").strip(),
-            str(prof.get("google_scholar") or "").strip(),
-        ]
-        lines.append(" | ".join(value for value in identities if value))
+    for prof in professors[:200]:
+        name = str(prof.get("name") or "").strip()
+        university = str(prof.get("university") or "").strip()
+        lines.append(" | ".join(value for value in (name, university) if value))
     if blacklist:
         lines.append("REMOVED BY USER:")
         lines.extend(
             f"{item.get('name', '')} | {item.get('university', '')}"
             for item in blacklist[:100]
         )
-    return "\n".join(lines) or "(empty)"
+    return ("\n".join(lines)[:16000] or "(empty)").rstrip()
+
+
+def _codex_search_batch_specs(
+    keywords: list[str],
+    regions: list[str],
+    max_results: int,
+    batch_size: int,
+) -> list[dict[str, Any]]:
+    clean_keywords = [str(value).strip() for value in keywords if str(value).strip()]
+    clean_regions = [str(value).strip() for value in regions if str(value).strip()]
+    keyword_lanes = clean_keywords or ["applicant profile fit"]
+    region_lanes = clean_regions or ["global"]
+    discovery_paths = (
+        "official university faculty directories and personal homepages",
+        "CSRankings followed by official affiliation verification",
+        "Google Scholar profiles followed by official faculty pages",
+    )
+    batch_count = (max_results + batch_size - 1) // batch_size
+    specs = []
+    for index in range(batch_count):
+        target = min(batch_size, max_results - index * batch_size)
+        region = region_lanes[index % len(region_lanes)]
+        keyword = keyword_lanes[(index // len(region_lanes)) % len(keyword_lanes)]
+        discovery_path = discovery_paths[index % len(discovery_paths)]
+        specs.append({
+            "index": index + 1,
+            "target": target,
+            "focus": (
+                f"Region lane: {region}\n"
+                f"Research lane: {keyword}\n"
+                f"Primary discovery path: {discovery_path}"
+            ),
+        })
+    return specs
 
 
 async def _build_codex_search_prompt(
     keywords: list[str],
     regions: list[str],
     max_results: int,
+    focus: str = "",
 ) -> str:
     cfg = load_yaml_config()
     preference = str(
@@ -1252,6 +1148,9 @@ Target research directions:
 Target regions:
 {", ".join(regions) or "(no region restriction)"}
 
+This batch has one narrow discovery focus:
+{focus or "(use the general target above)"}
+
 User search preference:
 {preference or "(none)"}
 
@@ -1266,6 +1165,9 @@ Requirements:
   existing or removed professor merely because the fit is strong.
 - Use several discovery paths, especially official faculty pages, personal
   homepages, Google Scholar, and CSRankings. Prefer current, active faculty.
+- This is a small batch. Use at most four focused web searches, verify at most
+  {max_results} strong candidates, and return as soon as those candidates are
+  verified. Do not broaden the search after reaching the batch target.
 - For a professor based in mainland China, verify and return the exact Chinese
   name from an official Chinese source. For every other region, return the
   English or romanized name and do not use a Chinese name.
@@ -1273,6 +1175,11 @@ Requirements:
   "name {{at}} school {{dot}} edu", but leave email empty if it cannot be verified.
 - recent_papers should be a concise plain-text list of verified representative or
   recent works. Never invent titles or publication status.
+- For each candidate, recommend up to three papers that are naturally relevant
+  to the applicant profile and target direction. Among similarly relevant works,
+  prefer explicitly more-cited papers. Every recommended_papers item needs a
+  verified HTTP(S) URL and a brief Chinese why_recommended note. Use null for an
+  unverified year or citation count; omit uncertain papers rather than guessing.
 - sources must contain the public URLs used to verify identity and affiliation.
   Return no candidate without at least one credible source URL.
 - Return only the requested JSON. Use empty strings or empty arrays for unknown
@@ -1319,16 +1226,12 @@ async def _save_codex_candidate(candidate: dict[str, Any]) -> tuple[str, dict | 
         ),
         "research_summary": str(candidate.get("research_summary") or "").strip(),
         "recent_papers": str(candidate.get("recent_papers") or "").strip(),
+        "recommended_papers": _serialize_recommended_papers(
+            candidate.get("recommended_papers")
+        ),
         "region": region,
         "source": "auto",
-        "tags": json.dumps(
-            [
-                str(tag).strip()
-                for tag in candidate.get("tags", [])
-                if str(tag).strip()
-            ],
-            ensure_ascii=False,
-        ),
+        "tags": _new_professor_tags(candidate.get("tags", [])),
     }
     match = await db.find_existing_professor_match(prof_data)
     if match:
@@ -1356,61 +1259,184 @@ async def _search_professors_codex(
     keywords: Optional[list[str]] = None,
     regions: Optional[list[str]] = None,
     max_results: int = 20,
+    agent_backend: str = "codex",
 ) -> AsyncGenerator[dict, None]:
     cfg = load_yaml_config()
     search_cfg = cfg.get("search", {}) or {}
-    codex_cfg = search_cfg.get("codex", {}) or {}
+    agent_cfg = (
+        search_cfg.get(agent_backend, {})
+        or search_cfg.get("agent", {})
+        or search_cfg.get("codex", {})
+        or {}
+    )
     llm_codex_cfg = (cfg.get("llm", {}) or {}).get("codex", {}) or {}
     resolved_keywords = keywords or search_cfg.get("keywords", []) or []
     resolved_regions = regions or search_cfg.get("regions", []) or []
     max_results = max(1, min(int(max_results or 20), 40))
-    timeout_seconds = max(30, int(codex_cfg.get("timeout_seconds", 900)))
-    prompt = await _build_codex_search_prompt(
+    batch_size = max(2, min(int(agent_cfg.get("batch_size", 3)), 5))
+    parallel_batches = max(
+        1,
+        min(int(agent_cfg.get("parallel_batches", 2)), 3),
+    )
+    timeout_seconds = max(
+        45,
+        min(int(agent_cfg.get("timeout_seconds", 120)), 180),
+    )
+    batch_specs = _codex_search_batch_specs(
         resolved_keywords,
         resolved_regions,
         max_results,
+        batch_size,
     )
-
-    yield {"type": "progress", "message": "Codex Search Agent 已启动"}
-    result_data: dict[str, Any] | None = None
-    async for message in stream_codex_task(
-        prompt=prompt,
-        output_schema=_codex_search_output_schema(),
-        timeout_seconds=timeout_seconds,
-        harness="search",
-        model=str(llm_codex_cfg.get("model") or "").strip() or None,
-    ):
-        if message.get("type") == "progress":
-            yield {"type": "progress", "message": message.get("message", "")}
-        elif message.get("type") == "result":
-            data = message.get("data")
-            if isinstance(data, dict):
-                result_data = data
-
-    if result_data is None:
-        raise CodexWorkerError("Codex Worker 未返回结构化搜索结果")
-
-    candidates = result_data.get("candidates")
-    if not isinstance(candidates, list):
-        raise CodexWorkerError("Codex Worker 返回的 candidates 格式无效")
+    queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    semaphore = asyncio.Semaphore(parallel_batches)
+    model_config = (
+        get_model_api_config(cfg)
+        if agent_backend == "pi"
+        else None
+    )
+    model = (
+        str(model_config.get("model") or "").strip()
+        if model_config
+        else str(llm_codex_cfg.get("model") or "").strip()
+    ) or None
+    agent_label = "Pi" if agent_backend == "pi" else "Codex"
 
     yield {
         "type": "progress",
-        "message": f"Codex 找到 {len(candidates)} 位候选，正在进行本地校验和去重",
+        "message": (
+            f"{agent_label} Search Agent 已启动：{len(batch_specs)} 个小批次，"
+            f"最多 {parallel_batches} 批并行"
+        ),
     }
-    saved_count = 0
-    for raw_candidate in candidates[:max_results]:
-        if not isinstance(raw_candidate, dict):
-            continue
-        message, saved = await _save_codex_candidate(raw_candidate)
-        yield {"type": "progress", "message": message}
-        if saved:
-            saved_count += 1
-            yield {"type": "professor", "data": saved}
 
-    summary = str(result_data.get("summary") or "").strip()
-    if summary:
-        yield {"type": "progress", "message": f"Codex 总结：{summary}"}
+    async def run_batch(spec: dict[str, Any]) -> None:
+        index = int(spec["index"])
+        try:
+            async with semaphore:
+                prompt = await _build_codex_search_prompt(
+                    resolved_keywords,
+                    resolved_regions,
+                    int(spec["target"]),
+                    str(spec["focus"]),
+                )
+                await queue.put({
+                    "kind": "progress",
+                    "index": index,
+                    "message": f"第 {index}/{len(batch_specs)} 批开始检索",
+                })
+                result_data: dict[str, Any] | None = None
+                async for worker_message in stream_agent_task(
+                    prompt=prompt,
+                    backend=agent_backend,
+                    output_schema=_codex_search_output_schema(),
+                    timeout_seconds=timeout_seconds,
+                    harness="search",
+                    model=model,
+                    model_config=model_config,
+                ):
+                    if worker_message.get("type") == "progress":
+                        await queue.put({
+                            "kind": "progress",
+                            "index": index,
+                            "message": str(worker_message.get("message") or ""),
+                        })
+                    elif worker_message.get("type") == "result":
+                        data = worker_message.get("data")
+                        if isinstance(data, dict):
+                            result_data = data
+                if result_data is None:
+                    raise RuntimeError("Agent Worker 未返回结构化结果")
+                await queue.put({
+                    "kind": "result",
+                    "index": index,
+                    "target": int(spec["target"]),
+                    "data": result_data,
+                })
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            await queue.put({
+                "kind": "error",
+                "index": index,
+                "message": str(exc),
+            })
+
+    tasks = [
+        asyncio.create_task(run_batch(spec), name=f"codex-search-batch-{spec['index']}")
+        for spec in batch_specs
+    ]
+    saved_count = 0
+    completed_batches = 0
+    successful_batches = 0
+    failures: list[str] = []
+    try:
+        while completed_batches < len(batch_specs) and saved_count < max_results:
+            event = await queue.get()
+            index = int(event["index"])
+            kind = event["kind"]
+            if kind == "progress":
+                message = str(event.get("message") or "").strip()
+                if message:
+                    yield {
+                        "type": "progress",
+                        "message": f"[批次 {index}] {message}",
+                    }
+                continue
+
+            completed_batches += 1
+            if kind == "error":
+                error = str(event.get("message") or "未知错误")
+                failures.append(error)
+                yield {
+                    "type": "progress",
+                    "message": f"[批次 {index}] 未完成：{error}，继续其他批次",
+                }
+                continue
+
+            successful_batches += 1
+            result_data = event.get("data") or {}
+            candidates = result_data.get("candidates")
+            if not isinstance(candidates, list):
+                failures.append("candidates 格式无效")
+                yield {
+                    "type": "progress",
+                    "message": f"[批次 {index}] 返回格式无效，继续其他批次",
+                }
+                continue
+            yield {
+                "type": "progress",
+                "message": (
+                    f"[批次 {index}] 找到 {len(candidates)} 位候选，"
+                    "正在本地校验和去重"
+                ),
+            }
+            for raw_candidate in candidates[: int(event["target"])]:
+                if saved_count >= max_results:
+                    break
+                if not isinstance(raw_candidate, dict):
+                    continue
+                message, saved = await _save_codex_candidate(raw_candidate)
+                yield {"type": "progress", "message": message}
+                if saved:
+                    saved_count += 1
+                    yield {"type": "professor", "data": saved}
+
+            summary = str(result_data.get("summary") or "").strip()
+            if summary:
+                yield {
+                    "type": "progress",
+                    "message": f"[批次 {index}] {summary}",
+                }
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    if successful_batches == 0 and failures:
+        raise RuntimeError(f"{agent_label} 分批搜索均未完成：{failures[0]}")
+
     all_professors = await db.get_professors()
     yield {
         "type": "done",
@@ -1424,45 +1450,21 @@ async def search_professors(
     regions: Optional[list[str]] = None,
     max_results: int = 20,
 ) -> AsyncGenerator[dict, None]:
-    """Dispatch professor discovery to the configured search provider."""
-    cfg = load_yaml_config()
-    search_cfg = cfg.get("search", {}) or {}
-    provider = str(search_cfg.get("provider", "auto")).strip().lower()
-    llm_provider = str(
-        (cfg.get("llm", {}) or {}).get("provider", "openai")
-    ).strip().lower()
-    if llm_provider == "codex":
-        # Codex owns web tooling inside its App Server harness. Never route it
-        # through the legacy LangChain bind_tools path, even with stale config.
-        provider = "codex"
-    elif provider == "auto":
-        provider = "codex" if llm_provider == "codex" else "serper"
-
-    if provider == "codex":
-        try:
-            async for message in _search_professors_codex(
-                keywords=keywords,
-                regions=regions,
-                max_results=max_results,
-            ):
-                yield message
-            return
-        except CodexWorkerError as exc:
-            codex_cfg = search_cfg.get("codex", {}) or {}
-            if not codex_cfg.get("fallback_to_serper", False):
-                yield {"type": "error", "message": str(exc)}
-                return
-            yield {
-                "type": "progress",
-                "message": f"Codex 搜索不可用，切换到 Serper：{exc}",
-            }
-    elif provider != "serper":
-        yield {"type": "error", "message": f"未知搜索 provider：{provider}"}
+    """Discover professors through the selected Codex or Pi Harness."""
+    agent_backend = resolve_agent_backend(load_yaml_config().get("llm", {}) or {})
+    if agent_backend not in {"codex", "pi"}:
+        yield {
+            "type": "error",
+            "message": "导师搜索需要 Codex 或 Pi Harness，请在设置中选择对应执行引擎",
+        }
         return
-
-    async for message in _search_professors_legacy(
-        keywords=keywords,
-        regions=regions,
-        max_results=max_results,
-    ):
-        yield message
+    try:
+        async for message in _search_professors_codex(
+            keywords=keywords,
+            regions=regions,
+            max_results=max_results,
+            agent_backend=agent_backend,
+        ):
+            yield message
+    except (CodexWorkerError, PiWorkerError, RuntimeError, ValueError) as exc:
+        yield {"type": "error", "message": str(exc)}

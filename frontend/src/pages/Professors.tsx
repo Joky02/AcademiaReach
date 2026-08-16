@@ -31,6 +31,7 @@ const REGION_ORDER = ['China', 'Hong Kong', 'Singapore', 'US', 'UK', 'CA', 'AU']
 
 // 预设标签及颜色
 const PRESET_TAGS: Record<string, { label: string; color: string }> = {
+  '新': { label: '新', color: 'bg-indigo-500 text-white border-indigo-500' },
   '院士': { label: '院士', color: 'bg-red-100 text-red-700 border-red-200' },
   '杰青': { label: '杰青', color: 'bg-orange-100 text-orange-700 border-orange-200' },
   '优青': { label: '优青', color: 'bg-amber-100 text-amber-700 border-amber-200' },
@@ -83,7 +84,7 @@ const regionColors: Record<string, string> = {
   AU: 'from-cyan-500 to-sky-600',
 }
 
-type StatusFilter = 'all' | 'starred' | 'needs_email' | 'no_draft' | 'draft' | 'sent'
+type StatusFilter = 'all' | 'new' | 'starred' | 'needs_email' | 'no_draft' | 'draft' | 'sent'
 
 export default function Professors({
   wsMessages, searching, searchLog, onStartSearch, onOpenSearchModal, composing, onStartCompose,
@@ -92,9 +93,6 @@ export default function Professors({
   const [draftsMap, setDraftsMap] = useState<Record<number, any[]>>({})
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
-
-  // Track newly added professor IDs (during this session)
-  const [newProfIds, setNewProfIds] = useState<Set<number>>(new Set())
 
   // Detail modal
   const [selectedProf, setSelectedProf] = useState<any>(null)
@@ -180,7 +178,6 @@ export default function Professors({
     if (latest.channel === 'search') {
       if (latest.type === 'done' || latest.type === 'error') fetchData()
       if (latest.type === 'professor') {
-        if (latest.data?.id) setNewProfIds((prev) => new Set(prev).add(latest.data.id))
         fetchData()
       }
     }
@@ -244,6 +241,7 @@ export default function Professors({
   const filteredProfessors = useMemo(() => {
     return scopedProfessors.filter((p) => {
       const status = getEmailStatus(p.id)
+      if (statusFilter === 'new') return parseTags(p.tags).includes('新')
       if (statusFilter === 'starred') return !!p.is_starred
       if (statusFilter === 'needs_email') return isPlaceholderEmail(p.email)
       if (statusFilter === 'no_draft') return !status
@@ -275,7 +273,6 @@ export default function Professors({
   }, [filteredProfessors])
 
   const handleSearch = () => {
-    setNewProfIds(new Set())
     onStartSearch()
   }
 
@@ -359,6 +356,7 @@ export default function Professors({
 
   const statusFilters: Array<{ key: StatusFilter; label: string; count: number }> = [
     { key: 'all', label: '全部', count: scopedProfessors.length },
+    { key: 'new', label: '新找到', count: scopedProfessors.filter((p) => parseTags(p.tags).includes('新')).length },
     { key: 'starred', label: '收藏', count: scopedProfessors.filter((p) => p.is_starred).length },
     { key: 'needs_email', label: '缺邮箱', count: scopedProfessors.filter((p) => isPlaceholderEmail(p.email)).length },
     { key: 'no_draft', label: '未生成', count: scopedProfessors.filter((p) => !getEmailStatus(p.id)).length },
@@ -689,11 +687,6 @@ export default function Professors({
                                     })()}
                                     {/* Status badges */}
                                     <div className="mt-1.5 flex flex-wrap gap-1.5 items-center">
-                                      {newProfIds.has(p.id) && (
-                                        <span className="inline-flex items-center rounded-full bg-indigo-500 px-1.5 py-0.5 text-[10px] font-bold text-white">
-                                          新
-                                        </span>
-                                      )}
                                       {es === 'sent' && (
                                         <span className="inline-flex items-center gap-0.5 rounded-full bg-green-50 px-2 py-0.5 text-[10px] font-medium text-green-600">
                                           <Send className="h-2.5 w-2.5" /> 已发送

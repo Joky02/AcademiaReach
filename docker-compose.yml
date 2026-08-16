@@ -8,10 +8,12 @@ services:
     environment:
       TAOCI_ALLOWED_ORIGINS: ${TAOCI_ALLOWED_ORIGINS:-http://localhost:5173}
       TAOCI_CODEX_SOCKET: /run/taoci-codex/worker.sock
+      TAOCI_PI_SOCKET: /run/taoci-pi/worker.sock
     volumes:
       - ${TAOCI_CONFIG_DIR:-./backend/config}:/app/backend/config
       - ${TAOCI_DATA_DIR:-./backend/data}:/app/backend/data
       - ${TAOCI_CODEX_SOCKET_DIR:-/tmp/taoci-codex-1000}:/run/taoci-codex
+      - ${TAOCI_PI_SOCKET_DIR:-/tmp/taoci-pi-1000}:/run/taoci-pi
     expose:
       - "8000"
     read_only: true
@@ -31,6 +33,24 @@ services:
       timeout: 5s
       start_period: 15s
       retries: 3
+
+  pi-worker:
+    build:
+      context: .
+      dockerfile: pi_worker/Dockerfile
+    restart: unless-stopped
+    init: true
+    environment:
+      TAOCI_PI_CONCURRENCY: ${TAOCI_PI_CONCURRENCY:-4}
+    volumes:
+      - ${TAOCI_PI_SOCKET_DIR:-/tmp/taoci-pi-1000}:/run/taoci-pi
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
 
   web:
     build:

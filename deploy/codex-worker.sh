@@ -16,14 +16,90 @@ worker_pid() {
   fi
 }
 
+is_target_worker_pid() {
+  local pid="${1:-}"
+  local cmdline
+  if [[ -z "${pid}" ]] || [[ ! -r "/proc/${pid}/cmdline" ]]; then
+    return 1
+  fi
+  cmdline="$(tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null)" || return 1
+  [[ "${cmdline}" == *" -m codex_worker.server "* ]] \
+    && [[ "${cmdline}" == *"--socket ${SOCKET_PATH}"* ]]
+}
+
+matching_worker_pids() {
+  local cmdline_path pid
+  for cmdline_path in /proc/[0-9]*/cmdline; do
+    [[ -r "${cmdline_path}" ]] || continue
+    pid="${cmdline_path#/proc/}"
+    pid="${pid%/cmdline}"
+    if is_target_worker_pid "${pid}"; then
+      printf '%s\n' "${pid}"
+    fi
+  done
+}
+
+terminate_worker_pids() {
+  local pids=("$@")
+  local pid pgid alive
+  if [[ ${#pids[@]} -eq 0 ]]; then
+    return
+  fi
+  for pid in "${pids[@]}"; do
+    if is_target_worker_pid "${pid}"; then
+      pgid="$(ps -o pgid= -p "${pid}" 2>/dev/null | tr -d '[:space:]')"
+      if [[ "${pgid}" == "${pid}" ]]; then
+        kill -TERM -- "-${pgid}" 2>/dev/null || true
+      else
+        kill "${pid}" 2>/dev/null || true
+      fi
+    fi
+  done
+  for _ in {1..20}; do
+    alive=0
+    for pid in "${pids[@]}"; do
+      if is_target_worker_pid "${pid}"; then
+        alive=1
+        break
+      fi
+    done
+    [[ "${alive}" -eq 0 ]] && return
+    sleep 0.25
+  done
+  for pid in "${pids[@]}"; do
+    if is_target_worker_pid "${pid}"; then
+      pgid="$(ps -o pgid= -p "${pid}" 2>/dev/null | tr -d '[:space:]')"
+      if [[ "${pgid}" == "${pid}" ]]; then
+        kill -KILL -- "-${pgid}" 2>/dev/null || true
+      else
+        kill -KILL "${pid}" 2>/dev/null || true
+      fi
+    fi
+  done
+}
+
+cleanup_orphan_workers() {
+  local current pid
+  local orphans=()
+  current="$(worker_pid)"
+  while IFS= read -r pid; do
+    if [[ -n "${pid}" ]] && [[ "${pid}" != "${current}" ]]; then
+      orphans+=("${pid}")
+    fi
+  done < <(matching_worker_pids)
+  if [[ ${#orphans[@]} -gt 0 ]]; then
+    terminate_worker_pids "${orphans[@]}"
+    echo "Removed ${#orphans[@]} stale Codex Worker process(es)."
+  fi
+}
+
 is_running() {
   local pid
   pid="$(worker_pid)"
   if [[ -z "${pid}" ]] || ! kill -0 "${pid}" 2>/dev/null; then
     return 1
   fi
-  [[ -r "/proc/${pid}/cmdline" ]] \
-    && [[ "$(tr '\0' ' ' < "/proc/${pid}/cmdline")" == *"codex_worker.server"* ]]
+  is_target_worker_pid "${pid}"
 }
 
 install_worker() {
@@ -44,6 +120,7 @@ start_worker() {
   mkdir -p "${WORKSPACE_DIR}"
   chmod 700 "${WORKSPACE_DIR}"
   if is_running; then
+    cleanup_orphan_workers
     echo "Codex Worker is already running (PID $(worker_pid))."
     return
   fi
@@ -51,13 +128,18 @@ start_worker() {
     echo "Codex Worker environment is missing. Run: $0 install" >&2
     exit 1
   fi
-  rm -f "${SOCKET_PATH}"
+  local stale_pids=()
+  while IFS= read -r pid; do
+    [[ -n "${pid}" ]] && stale_pids+=("${pid}")
+  done < <(matching_worker_pids)
+  terminate_worker_pids "${stale_pids[@]}"
+  rm -f "${PID_FILE}" "${SOCKET_PATH}"
   (
     cd "${ROOT}"
     PYTHONUNBUFFERED=1 setsid "${VENV_DIR}/bin/python" -u -m codex_worker.server \
       --socket "${SOCKET_PATH}" \
       --workspace "${WORKSPACE_DIR}" \
-      --concurrency "${TAOCI_CODEX_CONCURRENCY:-2}" \
+      --concurrency "${TAOCI_CODEX_CONCURRENCY:-4}" \
       </dev/null >"${LOG_FILE}" 2>&1 &
     echo "$!" > "${PID_FILE}"
   )
@@ -76,23 +158,18 @@ start_worker() {
 
 stop_worker() {
   local pid
-  pid="$(worker_pid)"
-  if [[ -z "${pid}" ]]; then
-    rm -f "${SOCKET_PATH}"
+  local pids=()
+  while IFS= read -r pid; do
+    [[ -n "${pid}" ]] && pids+=("${pid}")
+  done < <(matching_worker_pids)
+  if [[ ${#pids[@]} -eq 0 ]]; then
+    rm -f "${PID_FILE}" "${SOCKET_PATH}"
     echo "Codex Worker is not running."
     return
   fi
-  if kill -0 "${pid}" 2>/dev/null; then
-    kill "${pid}"
-    for _ in {1..20}; do
-      if ! is_running; then
-        break
-      fi
-      sleep 0.25
-    done
-  fi
+  terminate_worker_pids "${pids[@]}"
   rm -f "${PID_FILE}" "${SOCKET_PATH}"
-  echo "Codex Worker stopped."
+  echo "Codex Worker stopped (${#pids[@]} process(es))."
 }
 
 status_worker() {

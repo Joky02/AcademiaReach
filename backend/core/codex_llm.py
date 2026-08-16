@@ -99,7 +99,11 @@ class CodexChatModel(BaseChatModel):
         content = await run_codex_text(
             serialize_messages(messages),
             timeout_seconds=int(kwargs.get("timeout_seconds", self.timeout_seconds)),
-            harness=str(kwargs.get("codex_harness", "general")),
+            harness=str(
+                kwargs.get("agent_harness")
+                or kwargs.get("codex_harness")
+                or "general"
+            ),
             model=str(kwargs.get("model") or self.model_name).strip() or None,
             output_schema=kwargs.get("output_schema"),
         )
@@ -130,7 +134,7 @@ def codex_invoke_options(
 ) -> dict[str, Any]:
     if not is_codex_llm(llm):
         return {}
-    options: dict[str, Any] = {"codex_harness": harness}
+    options: dict[str, Any] = {"agent_harness": harness}
     if output_schema is not None:
         options["output_schema"] = output_schema
     return options

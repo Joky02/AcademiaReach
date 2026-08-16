@@ -41,6 +41,7 @@ class ProfessorBase(BaseModel):
     google_scholar: Optional[str] = None
     research_summary: Optional[str] = None
     recent_papers: Optional[str] = None
+    recommended_papers: Optional[str] = None
     region: Optional[str] = None
     source: ProfessorSource = ProfessorSource.MANUAL
 

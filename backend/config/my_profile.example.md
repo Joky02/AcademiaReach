@@ -10,21 +10,21 @@
 
 ## Research Interests
 
-Briefly describe your research directions, e.g.: Machine Learning for Combinatorial Optimization (ML4CO), LLM-assisted mathematical modeling, etc.
+Briefly describe your research directions, key problems of interest, and preferred methods.
 
 ## Research Experience
 
 ### Project 1: [Project Title]
-- **Duration**: 2024.09 - Present
-- **Advisor**: Prof. XXX
+- **Duration**: [Start Date] - [End Date or Present]
+- **Advisor**: [Advisor Name]
 - **Description**: Briefly describe the project, your role, the methods used, and key findings.
-- **Outcome**: e.g., Paper submitted to KDD 2026.
+- **Outcome**: e.g., manuscript submitted to [Venue] in [Year].
 
 ### Project 2: [Project Title]
-- **Duration**: 2025.01 - Present
-- **Advisor**: Prof. XXX
+- **Duration**: [Start Date] - [End Date or Present]
+- **Advisor**: [Advisor Name]
 - **Description**: Briefly describe the project.
-- **Outcome**: e.g., Paper under review at ACL 2026.
+- **Outcome**: e.g., open-source software, a technical report, or a paper under review.
 
 ## Publications
 
@@ -33,8 +33,8 @@ Briefly describe your research directions, e.g.: Machine Learning for Combinator
 
 ## Awards & Competitions
 
-- e.g., ACM-ICPC Regional Gold Medal
-- e.g., National Scholarship
+- [Award or Competition], [Year]
+- [Scholarship or Honor], [Year]
 
 ## Skills
 
@@ -45,5 +45,5 @@ Briefly describe your research directions, e.g.: Machine Learning for Combinator
 ## Application Goals
 
 - **Target Degree**: PhD
-- **Target Field**: e.g., ML4CO, LLM for Optimization
-- **Target Entry**: 2027 Fall
+- **Target Field**: [Research Area]
+- **Target Entry**: [Year and Term]

@@ -6,12 +6,17 @@
 
 # LLM 配置
 llm:
-  # 可选: codex, openai, deepseek, ollama
-  provider: "codex"
+  # Agent 执行引擎: direct（直接 API）、pi（Pi Harness）、codex（Codex App Server）
+  agent_backend: "codex"
+  # direct / pi 使用的底层模型 API: openai, deepseek, ollama
+  provider: "openai"
   # Codex App Server 配置；复用宿主机 codex login，不需要 API Key
   codex:
     # 留空则使用 Codex 账号当前默认模型
     model: ""
+    timeout_seconds: 600
+  # Pi SDK Harness 配置；模型和 API Key 继续读取下面所选 provider
+  pi:
     timeout_seconds: 600
   # OpenAI 配置
   openai:
@@ -30,16 +35,12 @@ llm:
 
 # 搜索配置
 search:
-  # auto 跟随全局 LLM：Codex 使用专用 harness，其他后端使用 Serper 工具链
-  # 也可显式设为 codex 或 serper；全局 LLM 为 Codex 时始终使用 Codex harness
-  provider: "auto"
-  codex:
-    # 单次 Codex 搜索超时；Worker 在宿主机运行，不读取此文件中的 API Key
-    timeout_seconds: 900
-    # Codex Worker 不可用时是否回退到旧版 Serper Search Agent
-    fallback_to_serper: false
-  # 仅供 Serper provider 或显式回退使用 (https://serper.dev)
-  serper_api_key: "your-serper-api-key"
+  # 导师搜索、补全和论文推荐使用 Codex/Pi Harness 的实时网页搜索
+  agent:
+    # Codex/Pi 共用的分批搜索参数；候选会逐批保存并显示
+    timeout_seconds: 120
+    batch_size: 3
+    parallel_batches: 2
   # 研究方向关键词
   keywords:
     - "machine learning"

@@ -1,4 +1,4 @@
-Subject: 2027 PhD Application - [Applicant Name], [Institution], [Country]
+Subject: [Entry Year] PhD Application - [Applicant Name], [Institution], [Country]
 
 Dear Professor {{ professor_salutation }},
 

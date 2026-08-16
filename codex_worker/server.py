@@ -17,6 +17,7 @@ from openai_codex import AsyncCodex, Sandbox
 LOGGER = logging.getLogger("taoci.codex_worker")
 MAX_REQUEST_BYTES = 2 * 1024 * 1024
 HEARTBEAT_SECONDS = 8
+FRESH_CONFIG_RETRY_DELAYS = (0.5, 1.5)
 
 COMMON_SECURITY_INSTRUCTIONS = """
 You are running as a backend model for Taoci, a PhD outreach application. Follow
@@ -51,6 +52,8 @@ HARNESS_PROFILES: dict[str, dict[str, Any]] = {
     },
     "enrich": {
         "web_search": True,
+        "reasoning_effort": "low",
+        "web_context_size": "low",
         "instructions": (
             "Research one academic using live web search. Prefer official university "
             "pages, personal homepages, Google Scholar, and publication pages. "
@@ -61,6 +64,8 @@ HARNESS_PROFILES: dict[str, dict[str, Any]] = {
     },
     "research": {
         "web_search": True,
+        "reasoning_effort": "medium",
+        "web_context_size": "medium",
         "instructions": (
             "Research an academic and representative publications using live web "
             "search. Prefer primary sources and Google Scholar. Use citation counts "
@@ -70,6 +75,9 @@ HARNESS_PROFILES: dict[str, dict[str, Any]] = {
     },
     "search": {
         "web_search": True,
+        "reasoning_effort": "low",
+        "web_context_size": "low",
+        "heartbeat_seconds": 15,
         "instructions": (
             "Discover new faculty candidates using live web search. Prefer official "
             "university pages, personal homepages, Google Scholar, publication pages, "
@@ -102,6 +110,7 @@ class CodexWorker:
         self.concurrency = concurrency
         self.semaphore = asyncio.Semaphore(concurrency)
         self.model = model
+        self.fresh_app_server_required = False
 
     async def handle(
         self,
@@ -191,7 +200,119 @@ class CodexWorker:
                 "message": f"Codex 已接收 {harness} 任务",
             },
         )
-        thread = await self.codex.thread_start(
+        thread_config: dict[str, Any] = {
+            "web_search": "live" if profile["web_search"] else "disabled",
+        }
+        if profile.get("reasoning_effort"):
+            thread_config["model_reasoning_effort"] = profile["reasoning_effort"]
+        if profile.get("web_context_size"):
+            thread_config["tools"] = {
+                "web_search": {"context_size": profile["web_context_size"]}
+            }
+        if self.fresh_app_server_required:
+            await self._run_with_fresh_codex(
+                request_id,
+                prompt,
+                harness,
+                output_schema,
+                requested_model,
+                writer,
+                profile,
+                thread_config,
+            )
+            return
+
+        try:
+            await self._run_with_codex(
+                self.codex,
+                request_id,
+                prompt,
+                harness,
+                output_schema,
+                requested_model,
+                writer,
+                profile,
+                thread_config,
+            )
+        except Exception as exc:
+            if not _is_stale_configuration_error(exc):
+                raise
+            self.fresh_app_server_required = True
+            LOGGER.warning(
+                "Codex App Server configuration became stale; retrying with a fresh process"
+            )
+            await _send(
+                writer,
+                {
+                    "id": request_id,
+                    "type": "progress",
+                    "message": "Codex 配置已变化，正在重新加载 Agent",
+                },
+            )
+            await self._run_with_fresh_codex(
+                request_id,
+                prompt,
+                harness,
+                output_schema,
+                requested_model,
+                writer,
+                profile,
+                thread_config,
+            )
+
+    async def _run_with_fresh_codex(
+        self,
+        request_id: str,
+        prompt: str,
+        harness: str,
+        output_schema: dict[str, Any] | None,
+        requested_model: str | None,
+        writer: asyncio.StreamWriter,
+        profile: dict[str, Any],
+        thread_config: dict[str, Any],
+    ) -> None:
+        attempts = len(FRESH_CONFIG_RETRY_DELAYS) + 1
+        for attempt in range(attempts):
+            try:
+                async with AsyncCodex() as codex:
+                    await self._run_with_codex(
+                        codex,
+                        request_id,
+                        prompt,
+                        harness,
+                        output_schema,
+                        requested_model,
+                        writer,
+                        profile,
+                        thread_config,
+                    )
+                return
+            except Exception as exc:
+                if not _is_stale_configuration_error(exc) or attempt >= attempts - 1:
+                    raise
+                delay = FRESH_CONFIG_RETRY_DELAYS[attempt]
+                LOGGER.warning(
+                    "Fresh Codex App Server hit a transient config error; "
+                    "retrying in %.1f seconds (%d/%d)",
+                    delay,
+                    attempt + 2,
+                    attempts,
+                )
+                await asyncio.sleep(delay)
+
+    async def _run_with_codex(
+        self,
+        codex: AsyncCodex,
+        request_id: str,
+        prompt: str,
+        harness: str,
+        output_schema: dict[str, Any] | None,
+        requested_model: str | None,
+        writer: asyncio.StreamWriter,
+        profile: dict[str, Any],
+        thread_config: dict[str, Any],
+    ) -> None:
+        thread = await codex.thread_start(
             cwd=str(self.workspace),
             developer_instructions=(
                 f"{COMMON_SECURITY_INSTRUCTIONS}\n\n"
@@ -200,9 +321,7 @@ class CodexWorker:
             ephemeral=True,
             model=requested_model or self.model,
             sandbox=Sandbox.read_only,
-            config={
-                "web_search": "live" if profile["web_search"] else "disabled"
-            },
+            config=thread_config,
         )
         turn = await thread.turn(prompt, output_schema=output_schema)
         run_task = asyncio.create_task(
@@ -211,11 +330,17 @@ class CodexWorker:
         )
         try:
             elapsed = 0
+            heartbeat_seconds = int(
+                profile.get("heartbeat_seconds", HEARTBEAT_SECONDS)
+            )
             while True:
-                done, _ = await asyncio.wait({run_task}, timeout=HEARTBEAT_SECONDS)
+                done, _ = await asyncio.wait(
+                    {run_task},
+                    timeout=heartbeat_seconds,
+                )
                 if run_task in done:
                     break
-                elapsed += HEARTBEAT_SECONDS
+                elapsed += heartbeat_seconds
                 await _send(
                     writer,
                     {
@@ -252,6 +377,17 @@ class CodexWorker:
                 with suppress(asyncio.CancelledError):
                     await run_task
             raise
+
+
+def _is_stale_configuration_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    config_load_error = (
+        "failed to load configuration" in message
+        or "error loading default config" in message
+    )
+    return config_load_error and (
+        "no such file or directory" in message or "os error 2" in message
+    )
 
 
 async def serve(args: argparse.Namespace) -> None:
@@ -298,7 +434,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--concurrency",
         type=int,
-        default=int(os.getenv("TAOCI_CODEX_CONCURRENCY", "2")),
+        default=int(os.getenv("TAOCI_CODEX_CONCURRENCY", "4")),
     )
     parser.add_argument("--model", default=os.getenv("TAOCI_CODEX_MODEL", ""))
     return parser.parse_args()

@@ -85,8 +85,8 @@ export const deletePaper = (name: string) =>
   api.delete(`/config/papers/${encodeURIComponent(name)}`)
 
 // ── 搜索关键词 ──────────────────────────────────────
-export const updateKeywords = (keywords: string[], regions?: string[], serperApiKey?: string) =>
-  api.put('/config/keywords', { keywords, regions, serper_api_key: serperApiKey })
+export const updateKeywords = (keywords: string[], regions?: string[]) =>
+  api.put('/config/keywords', { keywords, regions })
 
 // ── 邮箱验证 ────────────────────────────────────────
 export const getEmailConfig = () => api.get('/config/email')

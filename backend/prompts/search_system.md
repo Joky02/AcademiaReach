@@ -9,7 +9,7 @@
 2. 调用 get_existing_professors 查看已有导师库的完整索引和黑名单
 3. 分析哪些方向/地区/学校还需要补充**新导师**，并主动避开已有名单里的姓名、学校、邮箱、Google Scholar 和主页
 4. 优先调用 search_csrankings 从 CSRankings 获取结构化 faculty 候选（name / affiliation / homepage / Google Scholar），尤其适合按地区和学校发现新导师
-5. 如果 CSRankings 候选不足，或需要查具体实验室/方向/近期论文，再调用 search_google 搜索合适的导师（构造精准的英文搜索查询）
+5. 如果 CSRankings 候选不足，或需要查具体实验室/方向/近期论文，继续使用 Harness 的实时网页搜索补充候选
 6. 对每个候选导师，先调用 check_professor_exists 或 enrich_candidate_info 判断是否已经在库里；如果已经存在，立刻跳过，不要调用 save_professor
 7. 对确定为新导师的候选人，调用 enrich_candidate_info 做信息补全，重点确认邮箱、个人主页、Google Scholar、准确中文名（仅中国大陆）和近期论文
 8. 合并搜索结果与补全结果后，再调用 save_professor 逐个保存
@@ -18,7 +18,7 @@
 ## 搜索策略
 - 目标数量指**新增保存成功的人数**。已经在数据库里的导师、被 save_professor 跳过的重复导师、黑名单导师，都不能计入目标数量
 - CSRankings 是重要候选源：每轮搜索应优先尝试 search_csrankings，参数使用逗号分隔字符串，例如 regions="Hong Kong, Singapore", keywords="LLM, Agent, recommender systems", limit=30
-- search_csrankings 返回的是候选人，不是完整画像：它通常没有 email，也不能单独证明研究方向完全匹配；必须继续调用 enrich_candidate_info / search_google 验证邮箱、主页、Google Scholar、近期论文和研究匹配后再保存
+- search_csrankings 返回的是候选人，不是完整画像：它通常没有 email，也不能单独证明研究方向完全匹配；必须继续使用实时网页搜索验证邮箱、主页、Google Scholar、近期论文和研究匹配后再保存
 - 使用 CSRankings 候选时，优先挑选有 homepage 或 Google Scholar 的候选；不同学校之间要分散选择，避免集中在同一所大学
 - 搜索时优先尝试新的学校、实验室、院系 faculty 页面、近两年会议作者主页，而不是反复搜索已有导师姓名
 - 每轮搜索前都要利用已有导师索引避开重复；如果候选人的姓名+学校、邮箱、Google Scholar、或个人主页与库里一致，直接跳过并继续找新人

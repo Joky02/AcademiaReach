@@ -24,9 +24,10 @@
 
 | 模块 | 功能 |
 |------|------|
-| **全局 LLM 后端** | 在设置页选择 Codex App Server、OpenAI 兼容 API、DeepSeek 或 Ollama；Codex 使用任务专属 harness 且不需要 API Key |
-| **导师搜索** | 官方 Codex SDK 结合实时网页搜索，从学校主页、Google Scholar 和 CSRankings 中发现新导师；Serper 可作为备用 |
-| **Deep Research** | Codex 使用实时网页 research harness；其他后端使用 Serper 搜索结果和所选 LLM |
+| **全局 Agent 后端** | 独立选择 Direct API、Pi Harness 或 Codex App Server；Pi 可将任务 Harness 接到现有 OpenAI 兼容、DeepSeek 或 Ollama API |
+| **导师搜索** | Codex/Pi 结合实时网页搜索，从学校主页、Google Scholar 和 CSRankings 中发现新导师 |
+| **Deep Research** | Codex/Pi 使用任务专属 research harness 完成导师研究和论文推荐 |
+| **个性化论文推荐** | 导师补全会结合申请者 Profile 推荐可核验的相关代表作，保存被引证据、阅读理由和来源链接，并在写信时复用 |
 | **邮件撰写** | 根据导师研究方向 + 用户 Profile，LLM 生成个性化套磁邮件（中/英文自动切换） |
 | **邮件发送** | 草稿人工审核 → 编辑 → 确认发送（SMTP），支持附带中/英文 PDF 简历 |
 | **回复跟踪** | IMAP 轮询收件箱，双策略匹配导师回复（FROM 匹配 + 主题匹配），自动更新状态 |
@@ -42,7 +43,8 @@
 **后端**
 - Python 3.11, FastAPI, Uvicorn
 - 官方 Codex Python SDK + 宿主机 App Server Worker
-- 兼容 LangChain 的 Codex / OpenAI / DeepSeek / Ollama 多后端
+- 官方 Pi TypeScript SDK + 隔离 Bun Worker
+- 独立的 Harness 引擎与 OpenAI / DeepSeek / Ollama 模型 API 选择
 - SQLite (aiosqlite), Pydantic v2
 - SMTP 发送, IMAP 收件, WebSocket
 
@@ -59,14 +61,14 @@
 AcademiaReach/
 ├── backend/
 │   ├── config/
-│   │   ├── config.yaml.example  # 配置模板（复制为 config.yaml 后填入真实信息）
-│   │   └── my_profile.md        # 个人 Profile（研究背景、发表论文等）
+│   │   ├── config.yaml.example  # 公开配置模板（复制到被忽略的 config.yaml）
+│   │   └── my_profile.example.md # 公开 Profile 模板（复制到被忽略的 my_profile.md）
 │   ├── core/
 │   │   ├── models.py            # Pydantic 数据模型
 │   │   ├── database.py          # SQLite 异步 CRUD
 │   │   └── llm.py               # LLM 统一接口（多后端切换）
 │   ├── agents/
-│   │   ├── search_agent.py      # 导师搜索 Agent（LLM 规划 + CSRankings + Serper 搜索 + 信息提取）
+│   │   ├── search_agent.py      # 导师搜索 Agent（Harness 网页搜索 + CSRankings + 信息提取）
 │   │   └── compose_agent.py     # 邮件撰写 Agent（中英文 Prompt + 自定义风格注入）
 │   ├── services/
 │   │   ├── send_service.py      # SMTP 邮件发送 + 简历附件
@@ -96,6 +98,8 @@ AcademiaReach/
 │   └── vite.config.ts
 ├── codex_worker/                 # 宿主机 Codex SDK Worker（Unix Socket）
 ├── deploy/codex-worker.sh        # Worker 安装与启停脚本
+├── pi_worker/                   # Pi SDK Worker（Bun + Unix Socket）
+├── deploy/pi-worker.sh          # Pi Worker 安装与启停脚本
 ├── .gitignore
 └── README.md
 ```
@@ -139,8 +143,9 @@ cp backend/prompts/compose_cn.md backend/config/prompts/compose_cn.md
 ```
 
 编辑 `backend/config/config.yaml`，填入：
-- **全局 LLM provider** — Codex 复用 `codex login`；OpenAI / DeepSeek 需要 API Key；Ollama 使用本地模型
-- **搜索 provider** — `auto` 跟随全局后端；Codex 使用专用搜索 harness，其他后端使用 Serper 工具链
+- **Agent 执行引擎** — `direct`、`pi` 或 `codex`；Pi 使用任务 Harness 但不要求订阅
+- **模型 API** — Pi/Direct 共用 OpenAI 兼容、DeepSeek 或 Ollama 配置
+- **搜索后端** — 导师搜索和补全需要选择 Codex 或 Pi Harness
 - **SMTP 凭据** — 发件邮箱（也可在前端设置页验证并保存）
 - **IMAP 凭据** — 收件邮箱，用于回复跟踪
 
@@ -160,9 +165,14 @@ codex login
 # 启动宿主机 Codex Worker
 ./deploy/codex-worker.sh start
 
+# 首次安装并启动 Pi SDK Worker
+./deploy/pi-worker.sh install
+./deploy/pi-worker.sh start
+
 # 终端 1：后端
 conda activate academia
 TAOCI_CODEX_SOCKET=/tmp/taoci-codex-$(id -u)/worker.sock \
+TAOCI_PI_SOCKET=/tmp/taoci-pi-$(id -u)/worker.sock \
   uvicorn backend.main:app --reload --port 8000
 
 # 终端 2：前端
@@ -184,9 +194,12 @@ npm run dev
 
 ```yaml
 llm:
-  provider: codex                   # codex / openai / deepseek / ollama
+  agent_backend: pi               # direct / pi / codex
+  provider: deepseek               # openai / deepseek / ollama；供 direct/pi 使用
   codex:
     model: ""                       # 留空使用账号默认模型
+    timeout_seconds: 600
+  pi:
     timeout_seconds: 600
   openai:
     api_key: "sk-..."
@@ -201,11 +214,10 @@ llm:
     base_url: "http://localhost:11434"
 
 search:
-  provider: auto                     # auto / codex / serper；全局 Codex 始终使用自身 harness
-  codex:
-    timeout_seconds: 900
-    fallback_to_serper: false
-  serper_api_key: "..."              # 仅供可选回退
+  agent:
+    timeout_seconds: 120             # 每个小批次的超时
+    batch_size: 3                    # 每批候选数，完成即保存
+    parallel_batches: 2
   keywords:
     - "machine learning"
     - "natural language processing"
@@ -298,6 +310,7 @@ prompts:
 | PUT | `/api/config/profile` | 更新 Profile |
 | GET | `/api/config/settings` | 获取系统配置（脱敏） |
 | GET | `/api/codex/status` | 检查宿主机 Codex Worker |
+| GET | `/api/pi/status` | 检查 Pi SDK Worker |
 | PUT | `/api/config/keywords` | 更新搜索关键词 / 地区 |
 | GET | `/api/config/prompts` | 获取自定义 Prompt |
 | PUT | `/api/config/prompts` | 更新自定义 Prompt |

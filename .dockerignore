@@ -19,6 +19,7 @@ backend/config/email_templates
 deploy/cloudflare/config.yml
 deploy/cloudflare/*.json
 frontend/node_modules
+pi_worker/node_modules
 frontend/dist
 dist
 build

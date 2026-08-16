@@ -3,6 +3,7 @@ import {
   X, Mail, Send, FileText, ExternalLink, MapPin,
   GraduationCap, Loader2, CheckCircle2, AlertCircle,
   Pencil, Save, RefreshCw, MessageSquareReply, Clock,
+  BookOpen,
 } from 'lucide-react'
 import {
   deleteDraft, getDrafts, getProfessor, getReplies, sendEmail,
@@ -20,9 +21,30 @@ interface Professor {
   google_scholar?: string
   research_summary?: string
   recent_papers?: string
+  recommended_papers?: string | RecommendedPaper[]
   region?: string
   source?: string
   reply_status?: string
+}
+
+interface RecommendedPaper {
+  title: string
+  venue?: string
+  year?: number | null
+  citation_count?: number | null
+  url: string
+  why_recommended: string
+}
+
+const parseRecommendedPapers = (raw?: string | RecommendedPaper[]): RecommendedPaper[] => {
+  if (Array.isArray(raw)) return raw
+  if (!raw) return []
+  try {
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
+  }
 }
 
 interface Props {
@@ -37,7 +59,7 @@ export default function ProfessorDetail({ professor, onClose, onUpdate, wsMessag
   const [drafts, setDrafts] = useState<any[]>([])
   const [replies, setReplies] = useState<any[]>([])
   const [previewDraft, setPreviewDraft] = useState<any | null>(null)
-  const [activeSection, setActiveSection] = useState<'profile' | 'drafts' | 'conversation'>('drafts')
+  const [activeSection, setActiveSection] = useState<'profile' | 'papers' | 'drafts' | 'conversation'>('drafts')
   const [editingDraftId, setEditingDraftId] = useState<number | null>(null)
   const [draftForm, setDraftForm] = useState({ subject: '', body: '' })
   const [savingDraft, setSavingDraft] = useState(false)
@@ -192,6 +214,7 @@ export default function ProfessorDetail({ professor, onClose, onUpdate, wsMessag
 
   const hasSent = drafts.some((d) => d.status === 'sent')
   const hasPending = drafts.some((d) => d.status === 'pending')
+  const recommendedPapers = parseRecommendedPapers(view.recommended_papers)
 
   const EDITABLE_FIELDS: { key: string; label: string }[] = [
     { key: 'name', label: '姓名' },
@@ -382,6 +405,12 @@ export default function ProfessorDetail({ professor, onClose, onUpdate, wsMessag
                 资料
               </button>
               <button
+                onClick={() => setActiveSection('papers')}
+                className="rounded-lg px-3 py-2 text-sm font-medium text-gray-500 hover:bg-gray-100"
+              >
+                论文 {recommendedPapers.length}
+              </button>
+              <button
                 onClick={() => setActiveSection('drafts')}
                 className="rounded-lg px-3 py-2 text-sm font-medium text-gray-500 hover:bg-gray-100"
               >
@@ -506,6 +535,17 @@ export default function ProfessorDetail({ professor, onClose, onUpdate, wsMessag
                   资料
                 </button>
                 <button
+                  onClick={() => setActiveSection('papers')}
+                  className={`inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium ${
+                    activeSection === 'papers' ? 'bg-gray-900 text-white' : 'text-gray-500 hover:bg-gray-100'
+                  }`}
+                >
+                  <BookOpen className="h-4 w-4" />
+                  <span className="sm:hidden">论文</span>
+                  <span className="hidden sm:inline">推荐论文</span>
+                  <span className={activeSection === 'papers' ? 'text-gray-300' : 'text-gray-400'}>{recommendedPapers.length}</span>
+                </button>
+                <button
                   onClick={() => setActiveSection('drafts')}
                   className={`inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium ${
                     activeSection === 'drafts' ? 'bg-gray-900 text-white' : 'text-gray-500 hover:bg-gray-100'
@@ -536,6 +576,16 @@ export default function ProfessorDetail({ professor, onClose, onUpdate, wsMessag
                   <span className="hidden sm:inline">{composing ? '生成中...' : '生成邮件'}</span>
                 </button>
               )}
+              {activeSection === 'papers' && (
+                <button
+                  onClick={handleEnrich}
+                  disabled={enriching}
+                  title="重新检索推荐论文"
+                  className="flex h-9 w-9 items-center justify-center rounded-lg text-gray-500 hover:bg-gray-100 disabled:opacity-50"
+                >
+                  {enriching ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+                </button>
+              )}
             </div>
 
             <div className="min-h-0 flex-1 overflow-y-auto p-3 sm:p-5">
@@ -543,6 +593,56 @@ export default function ProfessorDetail({ professor, onClose, onUpdate, wsMessag
                 <div className="flex h-full items-center justify-center">
                   <Loader2 className="h-6 w-6 animate-spin text-gray-400" />
                 </div>
+              ) : activeSection === 'papers' ? (
+                recommendedPapers.length === 0 ? (
+                  <div className="flex h-full min-h-72 flex-col items-center justify-center text-center">
+                    <BookOpen className="h-10 w-10 text-gray-300" />
+                    <p className="mt-3 text-sm font-medium text-gray-700">暂无个性化推荐论文</p>
+                    <button
+                      onClick={handleEnrich}
+                      disabled={enriching}
+                      className="mt-4 inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
+                    >
+                      {enriching ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+                      {enriching ? '检索中...' : '检索推荐论文'}
+                    </button>
+                  </div>
+                ) : (
+                  <div className="mx-auto max-w-4xl space-y-3">
+                    {recommendedPapers.map((paper, index) => (
+                      <article key={`${paper.title}-${index}`} className="rounded-lg border border-gray-200 bg-white p-4 sm:p-5">
+                        <div className="flex items-start gap-3">
+                          <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-indigo-50 text-xs font-semibold text-indigo-700">
+                            {index + 1}
+                          </span>
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-start justify-between gap-3">
+                              <h3 className="text-sm font-semibold leading-6 text-gray-900">{paper.title}</h3>
+                              <a
+                                href={paper.url}
+                                target="_blank"
+                                rel="noreferrer"
+                                title="打开论文来源"
+                                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-gray-400 hover:bg-gray-100 hover:text-indigo-600"
+                              >
+                                <ExternalLink className="h-4 w-4" />
+                              </a>
+                            </div>
+                            <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-gray-500">
+                              {(paper.venue || paper.year) && (
+                                <span>{[paper.venue, paper.year].filter(Boolean).join(' · ')}</span>
+                              )}
+                              {typeof paper.citation_count === 'number' && (
+                                <span className="font-medium text-amber-700">被引 {paper.citation_count}</span>
+                              )}
+                            </div>
+                            <p className="mt-3 text-sm leading-6 text-gray-700">{paper.why_recommended}</p>
+                          </div>
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                )
               ) : activeSection === 'drafts' ? (
                 drafts.length === 0 ? (
                   <div className="flex h-full min-h-72 flex-col items-center justify-center text-center">

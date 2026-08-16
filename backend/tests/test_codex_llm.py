@@ -40,7 +40,7 @@ class CodexChatModelTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("## SYSTEM INSTRUCTIONS", run_codex.await_args.args[0])
         self.assertIn("## USER", run_codex.await_args.args[0])
 
-    async def test_global_codex_overrides_stale_serper_search_config(self) -> None:
+    async def test_global_codex_owns_search_backend(self) -> None:
         async def codex_search(**_kwargs):
             yield {"type": "done", "message": "ok"}
 
@@ -49,21 +49,17 @@ class CodexChatModelTests(unittest.IsolatedAsyncioTestCase):
                 "backend.agents.search_agent.load_yaml_config",
                 return_value={
                     "llm": {"provider": "codex"},
-                    "search": {"provider": "serper"},
+                    "search": {},
                 },
             ),
             patch(
                 "backend.agents.search_agent._search_professors_codex",
                 new=codex_search,
             ),
-            patch(
-                "backend.agents.search_agent._search_professors_legacy"
-            ) as legacy_dispatch,
         ):
             messages = [message async for message in search_professors()]
 
         self.assertEqual(messages, [{"type": "done", "message": "ok"}])
-        self.assertFalse(legacy_dispatch.called)
 
 
 if __name__ == "__main__":

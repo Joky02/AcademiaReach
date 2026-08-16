@@ -28,6 +28,7 @@ env/
 
 # ── Node / 前端 ──
 frontend/node_modules/
+pi_worker/node_modules/
 frontend/dist/
 *.tsbuildinfo
 

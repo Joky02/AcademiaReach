@@ -14,11 +14,15 @@ DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "taoc
 
 EMAIL_RE = re.compile(r"^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$", re.IGNORECASE)
 CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+PUBLIC_EMAIL_DOMAINS = {
+    "gmail.com", "googlemail.com", "outlook.com", "hotmail.com",
+    "icloud.com", "qq.com", "163.com", "126.com",
+}
 
 PROFESSOR_MERGE_FIELDS = {
     "name", "email", "university", "department", "homepage", "google_scholar",
-    "research_summary", "recent_papers", "region", "source", "reply_status",
-    "is_starred", "tags",
+    "research_summary", "recent_papers", "recommended_papers", "region", "source",
+    "reply_status", "is_starred", "tags",
 }
 
 
@@ -46,6 +50,7 @@ async def init_db():
                 google_scholar TEXT,
                 research_summary TEXT,
                 recent_papers TEXT,
+                recommended_papers TEXT DEFAULT '[]',
                 region TEXT,
                 source TEXT DEFAULT 'manual',
                 reply_status TEXT DEFAULT 'no_reply',
@@ -99,6 +104,8 @@ async def init_db():
             await db.execute("ALTER TABLE professors ADD COLUMN tags TEXT DEFAULT '[]'")
         if "google_scholar" not in cols:
             await db.execute("ALTER TABLE professors ADD COLUMN google_scholar TEXT")
+        if "recommended_papers" not in cols:
+            await db.execute("ALTER TABLE professors ADD COLUMN recommended_papers TEXT DEFAULT '[]'")
         await db.execute("DELETE FROM drafts WHERE professor_id NOT IN (SELECT id FROM professors)")
         await db.execute("DELETE FROM replies WHERE professor_id NOT IN (SELECT id FROM professors)")
         await db.commit()
@@ -201,6 +208,29 @@ def _norm_name_university(value: object) -> str:
     return re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", _clean_str(value).lower())
 
 
+def _same_named_institution(data: dict, existing: dict) -> bool:
+    name = _clean_str(data.get("name"))
+    existing_name = _clean_str(existing.get("name"))
+    if (
+        not name
+        or not existing_name
+        or not _has_cjk(name)
+        or not _has_cjk(existing_name)
+        or _norm_name_university(name) != _norm_name_university(existing_name)
+    ):
+        return False
+    email = _valid_identity_email(data.get("email"))
+    existing_email = _valid_identity_email(existing.get("email"))
+    if not email or not existing_email:
+        return False
+    domain = email.rsplit("@", 1)[-1]
+    existing_domain = existing_email.rsplit("@", 1)[-1]
+    return (
+        domain == existing_domain
+        and domain not in PUBLIC_EMAIL_DOMAINS
+    )
+
+
 async def _fetch_professor(db: aiosqlite.Connection, prof_id: int) -> Optional[dict]:
     cursor = await db.execute("SELECT * FROM professors WHERE id = ?", (prof_id,))
     row = await cursor.fetchone()
@@ -251,6 +281,8 @@ async def find_existing_professor_match(
                 and _norm_name_university(row.get("university")) == university_key
             ):
                 return {"professor": row, "reason": "name/university"}
+            if _same_named_institution(data, row):
+                return {"professor": row, "reason": "name/institution-email-domain"}
         return None
     finally:
         await db.close()
@@ -269,6 +301,17 @@ def _parse_tags(raw: object) -> list[str]:
     return []
 
 
+def _parse_object_list(raw: object) -> list[dict]:
+    if isinstance(raw, str) and raw.strip():
+        try:
+            raw = json.loads(raw)
+        except Exception:
+            return []
+    if not isinstance(raw, list):
+        return []
+    return [item for item in raw if isinstance(item, dict)]
+
+
 def _merged_professor_update(keep: dict, incoming: dict) -> dict:
     update: dict = {}
 
@@ -281,13 +324,24 @@ def _merged_professor_update(keep: dict, incoming: dict) -> dict:
     if incoming_email and not keep_email:
         update["email"] = incoming["email"]
 
-    for field in ("university", "department", "google_scholar", "research_summary", "recent_papers", "region"):
+    for field in (
+        "university", "department", "google_scholar", "research_summary",
+        "recent_papers", "region",
+    ):
         if _has_value(incoming.get(field)) and not _has_value(keep.get(field)):
             update[field] = incoming[field]
 
     if _has_value(incoming.get("homepage")):
         if not _has_value(keep.get("homepage")) or (_generic_homepage(keep.get("homepage")) and not _generic_homepage(incoming.get("homepage"))):
             update["homepage"] = incoming["homepage"]
+
+    keep_recommendations = _parse_object_list(keep.get("recommended_papers"))
+    incoming_recommendations = _parse_object_list(incoming.get("recommended_papers"))
+    if incoming_recommendations and not keep_recommendations:
+        update["recommended_papers"] = json.dumps(
+            incoming_recommendations,
+            ensure_ascii=False,
+        )
 
     keep_tags = _parse_tags(keep.get("tags"))
     incoming_tags = _parse_tags(incoming.get("tags"))
@@ -383,13 +437,14 @@ async def create_professor(data: dict) -> dict:
         cursor = await db.execute(
             """INSERT INTO professors
                (name, email, university, department, homepage, google_scholar,
-                research_summary, recent_papers, region, source, tags)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                research_summary, recent_papers, recommended_papers, region, source, tags)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 data["name"], data["email"], data["university"],
                 data.get("department"), data.get("homepage"),
                 data.get("google_scholar"),
                 data.get("research_summary"), data.get("recent_papers"),
+                data.get("recommended_papers") or "[]",
                 data.get("region"), data.get("source", "manual"),
                 data.get("tags", "[]"),
             ),
@@ -467,7 +522,7 @@ async def update_professor_info(prof_id: int, data: dict):
     try:
         allowed = {"name", "email", "university", "department", "homepage",
                    "google_scholar", "research_summary", "recent_papers",
-                   "region", "tags"}
+                   "recommended_papers", "region", "tags"}
         update = {k: v for k, v in data.items() if k in allowed and v is not None}
         if not update:
             return

@@ -25,7 +25,8 @@ from backend.core.models import (
     ProfessorCreate, DraftUpdate, SearchRequest,
 )
 from backend.core.codex_client import get_codex_worker_status
-from backend.core.codex_llm import codex_invoke_options
+from backend.core.pi_client import get_pi_worker_status
+from backend.core.agent_llm import agent_invoke_options
 from backend.agents.search_agent import search_professors, enrich_professor
 from backend.agents.compose_agent import compose_emails
 from backend.services.send_service import send_email, send_batch
@@ -55,7 +56,11 @@ async def add_professor(prof: ProfessorCreate):
     if not data.get("email"):
         data["email"] = f"unknown-{data['name'].lower().replace(' ', '.')}@tbd"
     result = await db.create_professor(data)
-    return result
+    enrichment = await start_enrich_prof(int(result["id"]))
+    return {
+        **result,
+        "enrich_started": bool(enrichment.get("started")),
+    }
 
 
 @router.post("/professors/dedupe")
@@ -109,6 +114,7 @@ class ProfessorUpdate(BaseModel):
     google_scholar: Optional[str] = None
     research_summary: Optional[str] = None
     recent_papers: Optional[str] = None
+    recommended_papers: Optional[str] = None
     region: Optional[str] = None
 
 
@@ -491,7 +497,7 @@ async def generate_profile_from_cv(req: ProfileGenerateRequest):
         resp = await llm.ainvoke([
             SystemMessage(content=load_prompt("profile_generator")),
             HumanMessage(content=f"【CV 原文】\n{cv_text}\n\n【当前已保存 Profile】\n{current_profile_section}\n\n【用户补充说明】\n{pitch_section}"),
-        ], **codex_invoke_options(llm, "profile"))
+        ], **agent_invoke_options(llm, "profile"))
         content = (resp.content or "").strip()
     except Exception as e:
         logger.exception("Profile 生成失败")
@@ -507,7 +513,11 @@ async def generate_profile_from_cv(req: ProfileGenerateRequest):
 
 @router.get("/config/settings")
 async def get_settings():
-    from backend.core.llm import load_yaml_config
+    from backend.core.llm import (
+        load_yaml_config,
+        resolve_agent_backend,
+        resolve_model_provider,
+    )
     cfg = load_yaml_config()
     # 隐藏敏感信息
     llm_cfg = cfg.get("llm", {})
@@ -518,23 +528,30 @@ async def get_settings():
             "base_url": sub.get("base_url", default_base),
             "api_key_set": bool(sub.get("api_key", "")),
         }
+    codex_status, pi_status = await asyncio.gather(
+        get_codex_worker_status(),
+        get_pi_worker_status(),
+    )
+    agent_backend = resolve_agent_backend(llm_cfg)
+    model_provider = resolve_model_provider(llm_cfg)
     search_cfg = cfg.get("search", {}) or {}
-    codex_status = await get_codex_worker_status()
-    configured_search_provider = search_cfg.get("provider", "auto")
-    effective_search_provider = configured_search_provider
-    if llm_cfg.get("provider") == "codex":
-        effective_search_provider = "codex"
-    elif configured_search_provider == "auto":
-        effective_search_provider = "serper"
     safe_cfg = {
         "llm": {
-            "provider": llm_cfg.get("provider", "openai"),
+            "agent_backend": agent_backend,
+            "provider": model_provider,
             "codex": {
                 "model": (llm_cfg.get("codex", {}) or {}).get("model", ""),
                 "timeout_seconds": (
                     llm_cfg.get("codex", {}) or {}
                 ).get("timeout_seconds", 600),
                 "available": bool(codex_status.get("available")),
+            },
+            "pi": {
+                "timeout_seconds": (
+                    llm_cfg.get("pi", {}) or {}
+                ).get("timeout_seconds", 600),
+                "available": bool(pi_status.get("available")),
+                "version": pi_status.get("version", ""),
             },
             "openai": _llm_sub("openai", "https://api.openai.com/v1"),
             "deepseek": _llm_sub("deepseek", "https://api.deepseek.com/v1"),
@@ -544,13 +561,12 @@ async def get_settings():
             },
         },
         "search": {
-            "provider": configured_search_provider,
-            "effective_provider": effective_search_provider,
+            "agent_backend": agent_backend,
             "keywords": search_cfg.get("keywords", []),
             "regions": search_cfg.get("regions", []),
             "max_professors": search_cfg.get("max_professors", 20),
-            "serper_api_key_set": bool(search_cfg.get("serper_api_key", "")),
             "codex": codex_status,
+            "pi": pi_status,
         },
         "smtp": {
             "host": cfg.get("smtp", {}).get("host", ""),
@@ -571,6 +587,12 @@ async def get_settings():
 async def codex_status():
     """Check the host-side Codex worker without exposing auth or config."""
     return await get_codex_worker_status()
+
+
+@router.get("/pi/status")
+async def pi_status():
+    """Check the Pi SDK worker without exposing model credentials."""
+    return await get_pi_worker_status()
 
 
 # ── Prompt 模板编辑（backend/prompts/*.md）──────────
@@ -616,8 +638,10 @@ class LlmProviderSub(BaseModel):
 
 
 class LlmConfigUpdate(BaseModel):
+    agent_backend: Optional[str] = None
     provider: str
     codex: Optional[LlmProviderSub] = None
+    pi: Optional[LlmProviderSub] = None
     openai: Optional[LlmProviderSub] = None
     deepseek: Optional[LlmProviderSub] = None
     ollama: Optional[LlmProviderSub] = None
@@ -625,20 +649,37 @@ class LlmConfigUpdate(BaseModel):
 
 @router.put("/config/llm")
 async def update_llm_config(data: LlmConfigUpdate):
-    """切换 LLM provider 并更新对应 provider 的 model/base_url/api_key"""
+    """Update the harness backend independently from the model API."""
+    legacy_codex = data.provider == "codex"
     if data.provider not in ("codex", "openai", "deepseek", "ollama"):
         raise HTTPException(
             status_code=400,
-            detail="provider 必须是 codex/openai/deepseek/ollama",
+            detail="provider 必须是 openai/deepseek/ollama",
         )
 
-    from backend.core.llm import CONFIG_PATH, load_yaml_config
+    from backend.core.llm import (
+        CONFIG_PATH,
+        load_yaml_config,
+        resolve_model_provider,
+    )
     cfg = load_yaml_config()
     if "llm" not in cfg:
         cfg["llm"] = {}
-    cfg["llm"]["provider"] = data.provider
+    agent_backend = data.agent_backend or ("codex" if legacy_codex else "direct")
+    if agent_backend not in ("direct", "codex", "pi"):
+        raise HTTPException(
+            status_code=400,
+            detail="agent_backend 必须是 direct/codex/pi",
+        )
+    model_provider = (
+        resolve_model_provider(cfg["llm"])
+        if legacy_codex
+        else data.provider
+    )
+    cfg["llm"]["agent_backend"] = agent_backend
+    cfg["llm"]["provider"] = model_provider
 
-    for name in ("codex", "openai", "deepseek", "ollama"):
+    for name in ("codex", "pi", "openai", "deepseek", "ollama"):
         sub: Optional[LlmProviderSub] = getattr(data, name)
         if sub is None:
             continue
@@ -659,7 +700,11 @@ async def update_llm_config(data: LlmConfigUpdate):
 
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
         yaml.dump(cfg, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
-    return {"message": "LLM 配置已更新", "provider": data.provider}
+    return {
+        "message": "LLM 配置已更新",
+        "agent_backend": agent_backend,
+        "provider": model_provider,
+    }
 
 
 # ── 简历管理 ──────────────────────────────────────
@@ -758,7 +803,7 @@ async def delete_paper(name: str):
 
 # ── 自定义 Prompt 管理 ─────────────────────────────
 
-DEFAULT_PROMPTS = {
+DEFAULT_PRPiTS = {
     "search_preference": "找与我研究方向匹配的、正在招 PhD 的教授。优先找近两年有活跃论文发表的导师。",
     "compose_style_cn": "语气自然真诚，像同行之间交流。提到我和导师研究方向的具体交集，不要泛泛而谈。",
     "compose_style_en": "Be direct and specific. Mention a concrete connection between my work and the professor's recent research.",
@@ -774,7 +819,7 @@ async def get_prompts():
     cfg = load_yaml_config()
     saved = cfg.get("prompts", {})
     # 合并默认值和已保存值
-    result = {**DEFAULT_PROMPTS, **saved}
+    result = {**DEFAULT_PRPiTS, **saved}
     return result
 
 
@@ -799,7 +844,7 @@ async def update_prompts(data: PromptsUpdate):
             cfg["prompts"][field] = val
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
         yaml.dump(cfg, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
-    return {"message": "自定义 Prompt 已更新", **{**DEFAULT_PROMPTS, **cfg["prompts"]}}
+    return {"message": "自定义 Prompt 已更新", **{**DEFAULT_PRPiTS, **cfg["prompts"]}}
 
 
 # ── 搜索关键词管理 ────────────────────────────────
@@ -807,7 +852,6 @@ async def update_prompts(data: PromptsUpdate):
 class KeywordsUpdate(BaseModel):
     keywords: list[str]
     regions: Optional[list[str]] = None
-    serper_api_key: Optional[str] = None
 
 
 @router.put("/config/keywords")
@@ -820,15 +864,12 @@ async def update_keywords(data: KeywordsUpdate):
     cfg["search"]["keywords"] = data.keywords
     if data.regions is not None:
         cfg["search"]["regions"] = data.regions
-    if data.serper_api_key and data.serper_api_key.strip():
-        cfg["search"]["serper_api_key"] = data.serper_api_key.strip()
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
         yaml.dump(cfg, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
     return {
         "message": "搜索配置已更新",
         "keywords": data.keywords,
         "regions": cfg["search"].get("regions", []),
-        "serper_api_key_set": bool(cfg["search"].get("serper_api_key", "")),
     }
 
 
