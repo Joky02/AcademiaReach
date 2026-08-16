@@ -159,6 +159,10 @@ cd frontend
 npm run dev
 ```
 
+### Docker and Cloudflare Tunnel
+
+For a production-style Docker deployment behind a private Cloudflare Access login, see [Docker and Cloudflare Tunnel deployment](docs/cloudflare-tunnel.zh-CN.md).
+
 Open **http://localhost:5173** in your browser.
 
 ---

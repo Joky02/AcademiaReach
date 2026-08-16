@@ -159,6 +159,10 @@ npm run dev
 
 访问 **http://localhost:5173** 打开 Web UI。
 
+### Docker 与 Cloudflare Tunnel
+
+需要使用 Docker 部署并通过自己的域名访问时，请参考 [Docker 与 Cloudflare Tunnel 部署指南](docs/cloudflare-tunnel.zh-CN.md)。指南包含 Cloudflare Access 登录保护、持久化目录和 WebSocket 验证步骤。
+
 ---
 
 ## 配置说明

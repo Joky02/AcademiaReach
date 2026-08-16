@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,6 +16,15 @@ from backend.services.reply_tracker import start_reply_polling
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+allowed_origins = [
+    origin.strip()
+    for origin in os.getenv(
+        "TAOCI_ALLOWED_ORIGINS",
+        "http://localhost:5173,http://localhost:3000",
+    ).split(",")
+    if origin.strip()
+]
+
 app = FastAPI(
     title="套磁 Agent 系统",
     description="全自动博士套磁系统 API",
@@ -24,7 +34,7 @@ app = FastAPI(
 # CORS — 允许前端开发服务器访问
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000", "*"],
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
