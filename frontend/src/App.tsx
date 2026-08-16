@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { Routes, Route, NavLink } from 'react-router-dom'
 import {
   LayoutDashboard, Search, FileText, Send, MessageSquareReply, Settings,
-  GraduationCap, Menu,
+  Menu,
 } from 'lucide-react'
 import Dashboard from './pages/Dashboard'
 import Professors from './pages/Professors'
@@ -163,7 +163,7 @@ export default function App() {
         `}
       >
         <div className="flex h-16 items-center gap-3 border-b px-6">
-          <GraduationCap className="h-7 w-7 text-indigo-600" />
+          <img src="/taoci-mark.svg" alt="" aria-hidden="true" className="h-8 w-8" />
           <span className="text-lg font-bold text-gray-900">套磁 Agent</span>
         </div>
         <nav className="mt-4 space-y-1 px-3">
