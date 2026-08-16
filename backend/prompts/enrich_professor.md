@@ -2,7 +2,8 @@
 现在需要你根据 Google 搜索结果补全这位导师的详细信息。
 
 请返回一个 JSON 对象，包含以下字段（只填写你能从搜索结果中确认的信息，不确定的设为 null）：
-- email: 邮箱地址
+- name: 导师姓名。只有导师当前任职于中国大陆高校/科研院所时，才填写准确中文名；如果搜索结果只能确认英文名/拼音名，则设为 null，不要猜测。对于其他国家/地区（包括 US、UK、Singapore、Hong Kong、Macau、Taiwan 等）的导师，应填写学校主页、个人主页或 Google Scholar 上常用的英文名/romanized name，不要主动改成中文名
+- email: 邮箱地址。很多主页会用反爬格式展示邮箱，请读取并还原为可发送的真实邮箱，例如 `dongbin {at} math {dot} pku {dot} edu {dot} cn` 应填写为 `dongbin@math.pku.edu.cn`。常见写法包括 `{at}`、`[at]`、`(at)`、` at `、`{dot}`、`[dot]`、`(dot)`、` dot `；只有能从搜索结果支持完整地址时才填写
 - department: 院系
 - homepage: 个人主页 URL（学校官网或个人站点）
 - google_scholar: Google Scholar 个人主页 URL，形如 `https://scholar.google.com/citations?user=XXXX`。搜索结果中只要出现该链接就填上，没出现则设为 null
@@ -17,6 +18,9 @@
 
 规则：
 - 不要编造信息，只从搜索结果中提取
+- 如果搜索结果里出现反爬邮箱写法，先还原为标准邮箱再放入 `email` 字段；不要原样返回 `{at}` / `{dot}` 形式
+- 如果导师当前任职于中国大陆，优先根据中文官网、院系页面、实验室页面、新闻稿或个人简历确认中文名；英文主页、Google Scholar 或 DBLP 只能作为辅助证据，不能替代中文名证据
+- 如果导师当前任职地不是中国大陆，即使搜索结果里出现中文报道或中文译名，也不要把 `name` 改成中文；保留英文名/romanized name
 - 如果搜索结果中完全找不到这位导师的信息，返回所有字段为 null 的 JSON
 
 只返回 JSON 对象，不要其他文字。

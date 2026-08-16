@@ -14,6 +14,13 @@ from fastapi import APIRouter, HTTPException, UploadFile, File, WebSocket, WebSo
 from pydantic import BaseModel
 
 from backend.core import database as db
+from backend.core.attachments import (
+    PAPERS_DIR,
+    attachment_path,
+    get_attachment_path,
+    migrate_legacy_attachments,
+    remove_legacy_attachment,
+)
 from backend.core.models import (
     ProfessorCreate, DraftUpdate, SearchRequest,
 )
@@ -47,6 +54,13 @@ async def add_professor(prof: ProfessorCreate):
         data["email"] = f"unknown-{data['name'].lower().replace(' ', '.')}@tbd"
     result = await db.create_professor(data)
     return result
+
+
+@router.post("/professors/dedupe")
+async def dedupe_professors():
+    """合并已有重复导师。任一有效邮箱、Google Scholar 或非通用主页一致即视为同一导师。"""
+    merges = await db.dedupe_professors()
+    return {"merged": len(merges), "items": merges}
 
 
 @router.get("/professors/{prof_id}")
@@ -134,6 +148,89 @@ async def enrich_prof(prof_id: int):
     return result
 
 
+_enrich_tasks: dict[int, asyncio.Task] = {}
+
+
+def _active_enrich_ids() -> list[int]:
+    done_ids = [prof_id for prof_id, task in _enrich_tasks.items() if task.done()]
+    for prof_id in done_ids:
+        _enrich_tasks.pop(prof_id, None)
+    return sorted(_enrich_tasks)
+
+
+@router.get("/professors/enrich/status")
+async def get_enrich_status():
+    """返回当前仍在后台运行的导师补全任务。前端用它校准并发补全状态。"""
+    active_ids = _active_enrich_ids()
+    return {"active_ids": active_ids, "count": len(active_ids)}
+
+
+@router.post("/professors/{prof_id}/enrich/start")
+async def start_enrich_prof(prof_id: int):
+    """后台补全单个导师信息，进度通过 WebSocket 推送。"""
+    existing = _enrich_tasks.get(prof_id)
+    if existing and not existing.done():
+        active_ids = _active_enrich_ids()
+        return {
+            "message": "该导师正在补全中",
+            "professor_id": prof_id,
+            "started": False,
+            "active_ids": active_ids,
+        }
+
+    prof = await db.get_professor(prof_id)
+    if not prof:
+        raise HTTPException(status_code=404, detail="导师不存在")
+
+    async def _run():
+        async def emit(message: str):
+            await manager.broadcast({
+                "channel": "enrich",
+                "type": "progress",
+                "professor_id": prof_id,
+                "message": message,
+            })
+
+        try:
+            await emit(f"启动补全：{prof['name']} @ {prof['university']}")
+            result = await enrich_professor(prof_id, progress=emit)
+            if result.get("success"):
+                fields = result.get("updated_fields", [])
+                await manager.broadcast({
+                    "channel": "enrich",
+                    "type": "done",
+                    "professor_id": prof_id,
+                    "updated_fields": fields,
+                    "message": f"补全完成：{prof['name']}（{len(fields)} 个字段更新）",
+                })
+            else:
+                await manager.broadcast({
+                    "channel": "enrich",
+                    "type": "error",
+                    "professor_id": prof_id,
+                    "message": result.get("message", "补全失败"),
+                })
+        except Exception as e:
+            logger.exception("导师补全任务异常")
+            await manager.broadcast({
+                "channel": "enrich",
+                "type": "error",
+                "professor_id": prof_id,
+                "message": str(e),
+            })
+        finally:
+            _enrich_tasks.pop(prof_id, None)
+
+    _enrich_tasks[prof_id] = asyncio.create_task(_run())
+    active_ids = _active_enrich_ids()
+    return {
+        "message": "补全已启动",
+        "professor_id": prof_id,
+        "started": True,
+        "active_ids": active_ids,
+    }
+
+
 # ── 搜索导师 ──────────────────────────────────────────
 
 _search_task: Optional[asyncio.Task] = None
@@ -180,6 +277,11 @@ async def stop_search():
 @router.get("/drafts")
 async def list_drafts(status: Optional[str] = None):
     return await db.get_drafts(status=status)
+
+
+@router.get("/drafts/summary")
+async def list_draft_summaries():
+    return await db.get_draft_summaries()
 
 
 @router.get("/drafts/{draft_id}")
@@ -288,16 +390,14 @@ class ProfileGenerateRequest(BaseModel):
 
 @router.post("/config/profile/generate")
 async def generate_profile_from_cv(req: ProfileGenerateRequest):
-    """从已上传的 CV（优先 cv_cn.pdf）+ 用户补充说明，AI 生成 profile.md 草稿。
+    """从已上传的 CV（优先个人简历.pdf）+ 用户补充说明，AI 生成 profile.md 草稿。
     不直接覆盖 my_profile.md，只返回生成的文本供前端预览编辑后再保存。"""
     from backend.core.llm import get_llm, load_profile
     from backend.core.prompts import load_prompt
     from langchain_core.messages import HumanMessage, SystemMessage
 
-    cv_dir = Path(__file__).parent.parent / "config"
-    cn_path = cv_dir / "cv_cn.pdf"
-    en_path = cv_dir / "cv_en.pdf"
-    cv_path = cn_path if cn_path.exists() else (en_path if en_path.exists() else None)
+    migrate_legacy_attachments()
+    cv_path = get_attachment_path("cv", "cn") or get_attachment_path("cv", "en")
     if cv_path is None:
         raise HTTPException(status_code=400, detail="请先上传 CV（中文或英文），AI 才能基于 CV 生成 Profile")
 
@@ -464,32 +564,33 @@ async def update_llm_config(data: LlmConfigUpdate):
 
 # ── 简历管理 ──────────────────────────────────────
 
-CV_DIR = Path(__file__).parent.parent / "config"
 
-
-PAPERS_DIR = CV_DIR / "papers"
-
-
-def _file_status(path: Path) -> dict:
+def _file_status(path: Path | None, display_path: Path) -> dict:
     return {
-        "uploaded": path.exists(),
-        "size": path.stat().st_size if path.exists() else 0,
+        "uploaded": bool(path and path.exists()),
+        "size": path.stat().st_size if path and path.exists() else 0,
+        "name": path.name if path and path.exists() else display_path.name,
     }
 
 
 @router.get("/config/cv")
 async def get_cv_status():
     """获取所有附件状态：简历 + 成绩单（中/英）+ 论文列表"""
+    migrate_legacy_attachments()
     papers = []
     if PAPERS_DIR.exists():
         for p in sorted(PAPERS_DIR.iterdir()):
             if p.is_file() and p.suffix.lower() == ".pdf":
                 papers.append({"name": p.name, "size": p.stat().st_size})
     return {
-        "cv_cn": _file_status(CV_DIR / "cv_cn.pdf"),
-        "cv_en": _file_status(CV_DIR / "cv_en.pdf"),
-        "transcript_cn": _file_status(CV_DIR / "transcript_cn.pdf"),
-        "transcript_en": _file_status(CV_DIR / "transcript_en.pdf"),
+        "cv": {
+            "cn": _file_status(get_attachment_path("cv", "cn"), attachment_path("cv", "cn")),
+            "en": _file_status(get_attachment_path("cv", "en"), attachment_path("cv", "en")),
+        },
+        "transcript": {
+            "cn": _file_status(get_attachment_path("transcript", "cn"), attachment_path("transcript", "cn")),
+            "en": _file_status(get_attachment_path("transcript", "en"), attachment_path("transcript", "en")),
+        },
         "papers": papers,
     }
 
@@ -502,9 +603,10 @@ async def upload_cv(lang: str, file: UploadFile = File(...)):
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="仅支持 PDF 格式")
 
-    target = CV_DIR / f"cv_{lang}.pdf"
+    target = attachment_path("cv", lang)
     content = await file.read()
     target.write_bytes(content)
+    remove_legacy_attachment("cv", lang)
     return {"message": f"{'中文' if lang == 'cn' else '英文'}简历已上传", "size": len(content)}
 
 
@@ -515,9 +617,10 @@ async def upload_transcript(lang: str, file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail="lang 必须为 cn 或 en")
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="仅支持 PDF 格式")
-    target = CV_DIR / f"transcript_{lang}.pdf"
+    target = attachment_path("transcript", lang)
     content = await file.read()
     target.write_bytes(content)
+    remove_legacy_attachment("transcript", lang)
     return {"message": f"{'中文' if lang == 'cn' else '英文'}成绩单已上传", "size": len(content)}
 
 

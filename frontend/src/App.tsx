@@ -12,7 +12,7 @@ import Replies from './pages/Replies'
 import SettingsPage from './pages/Settings'
 import SearchModal from './components/SearchModal'
 import GlobalTaskIndicator from './components/GlobalTaskIndicator'
-import { connectWebSocket, startSearch, stopSearch } from './services/api'
+import { connectWebSocket, getEnrichStatus, startSearch, stopSearch } from './services/api'
 
 const navItems = [
   { path: '/', label: 'Dashboard', icon: LayoutDashboard },
@@ -36,6 +36,11 @@ export default function App() {
   const [composing, setComposing] = useState(false)
   const [composeLog, setComposeLog] = useState<string[]>([])
 
+  // ── Global enrich state ──
+  const [enrichingIds, setEnrichingIds] = useState<Set<number>>(new Set())
+  const [enrichLog, setEnrichLog] = useState<string[]>([])
+  const enriching = enrichingIds.size > 0
+
   const handleWsMessage = useCallback((data: any) => {
     setWsMessages((prev) => [...prev.slice(-99), data])
   }, [])
@@ -44,6 +49,21 @@ export default function App() {
     const ws = connectWebSocket(handleWsMessage)
     return () => ws.close()
   }, [handleWsMessage])
+
+  useEffect(() => {
+    const syncEnrichStatus = () => {
+      getEnrichStatus()
+        .then((res) => {
+          const ids = Array.isArray(res.data?.active_ids) ? res.data.active_ids : []
+          const activeIds: number[] = ids.map((id: any) => Number(id)).filter((id: number) => Number.isFinite(id))
+          setEnrichingIds(new Set<number>(activeIds))
+        })
+        .catch(() => {})
+    }
+    syncEnrichStatus()
+    const timer = window.setInterval(syncEnrichStatus, 5000)
+    return () => window.clearInterval(timer)
+  }, [])
 
   // ── Route WebSocket messages to global search/compose state ──
   useEffect(() => {
@@ -70,6 +90,26 @@ export default function App() {
       }
       if (latest.type === 'done' || latest.type === 'error') {
         setComposing(false)
+      }
+    }
+
+    if (latest.channel === 'enrich') {
+      if (latest.type === 'progress' || latest.type === 'error' || latest.type === 'done') {
+        setEnrichLog((prev) => [...prev, latest.message].filter(Boolean))
+      }
+      if (latest.type === 'progress') {
+        if (latest.professor_id) {
+          setEnrichingIds((prev) => new Set(prev).add(latest.professor_id))
+        }
+      }
+      if (latest.type === 'done' || latest.type === 'error') {
+        if (latest.professor_id) {
+          setEnrichingIds((prev) => {
+            const next = new Set(prev)
+            next.delete(latest.professor_id)
+            return next
+          })
+        }
       }
     }
   }, [wsMessages])
@@ -202,6 +242,8 @@ export default function App() {
         searchLog={searchLog}
         composing={composing}
         composeLog={composeLog}
+        enriching={enriching}
+        enrichLog={enrichLog}
         onStopSearch={handleStopSearch}
         onStopCompose={handleStopCompose}
         onOpenSearchModal={() => setSearchModalOpen(true)}

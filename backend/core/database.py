@@ -5,10 +5,21 @@ from __future__ import annotations
 import aiosqlite
 import json
 import os
+import re
 from datetime import datetime
 from typing import Optional
+from urllib.parse import parse_qs, urlparse
 
 DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "taoci.db")
+
+EMAIL_RE = re.compile(r"^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$", re.IGNORECASE)
+CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+
+PROFESSOR_MERGE_FIELDS = {
+    "name", "email", "university", "department", "homepage", "google_scholar",
+    "research_summary", "recent_papers", "region", "source", "reply_status",
+    "is_starred", "tags",
+}
 
 
 async def get_db() -> aiosqlite.Connection:
@@ -16,6 +27,7 @@ async def get_db() -> aiosqlite.Connection:
     db = await aiosqlite.connect(DB_PATH)
     db.row_factory = aiosqlite.Row
     await db.execute("PRAGMA journal_mode=WAL")
+    await db.execute("PRAGMA foreign_keys=ON")
     return db
 
 
@@ -87,6 +99,8 @@ async def init_db():
             await db.execute("ALTER TABLE professors ADD COLUMN tags TEXT DEFAULT '[]'")
         if "google_scholar" not in cols:
             await db.execute("ALTER TABLE professors ADD COLUMN google_scholar TEXT")
+        await db.execute("DELETE FROM drafts WHERE professor_id NOT IN (SELECT id FROM professors)")
+        await db.execute("DELETE FROM replies WHERE professor_id NOT IN (SELECT id FROM professors)")
         await db.commit()
     finally:
         await db.close()
@@ -94,11 +108,280 @@ async def init_db():
 
 # ── Professor CRUD ────────────────────────────────────
 
+def _clean_str(value: object) -> str:
+    return str(value or "").strip()
+
+
+def _has_value(value: object) -> bool:
+    text = _clean_str(value)
+    return bool(text) and text.lower() not in {"none", "null", "n/a", "na", "unknown"}
+
+
+def _has_cjk(value: object) -> bool:
+    return bool(CJK_RE.search(_clean_str(value)))
+
+
+def _valid_identity_email(value: object) -> Optional[str]:
+    email = _clean_str(value).lower()
+    if not email or email.endswith("@tbd") or email.startswith("unknown-") or email.startswith("http"):
+        return None
+    if not EMAIL_RE.match(email):
+        return None
+    return email
+
+
+def _normalize_url(value: object) -> Optional[str]:
+    raw = _clean_str(value)
+    if not raw or raw.lower() in {"none", "null", "n/a"}:
+        return None
+    if "://" not in raw:
+        raw = f"https://{raw}"
+    parsed = urlparse(raw)
+    if not parsed.netloc:
+        return None
+    netloc = parsed.netloc.lower()
+    if netloc.startswith("www."):
+        netloc = netloc[4:]
+    path = re.sub(r"/+", "/", parsed.path or "/").rstrip("/")
+    return f"{netloc}{path}".lower()
+
+
+def _normalize_scholar(value: object) -> Optional[str]:
+    raw = _clean_str(value)
+    if not raw:
+        return None
+    if "://" not in raw:
+        raw = f"https://{raw}"
+    parsed = urlparse(raw)
+    netloc = parsed.netloc.lower()
+    if "scholar.google." not in netloc:
+        return None
+    user = parse_qs(parsed.query).get("user", [""])[0].strip()
+    if user:
+        return user.lower()
+    normalized = _normalize_url(raw)
+    return normalized
+
+
+def _generic_homepage(value: object) -> bool:
+    normalized = _normalize_url(value)
+    if not normalized:
+        return True
+    path = "/" + normalized.split("/", 1)[1] if "/" in normalized else "/"
+    generic_paths = {
+        "/", "/people", "/people.htm", "/en/people.htm", "/faculty",
+        "/faculty.htm", "/people/faculty", "/people/faculty.htm",
+        "/staff", "/staff.htm", "/members", "/members.htm",
+    }
+    if path in generic_paths:
+        return True
+    if re.search(r"/(people|faculty|staff|members)/?$", path):
+        return True
+    return False
+
+
+def _professor_identity_values(data: dict) -> set[tuple[str, str]]:
+    identities: set[tuple[str, str]] = set()
+    email = _valid_identity_email(data.get("email"))
+    if email:
+        identities.add(("email", email))
+
+    for field in ("google_scholar", "homepage"):
+        scholar = _normalize_scholar(data.get(field))
+        if scholar:
+            identities.add(("google_scholar", scholar))
+
+    homepage = _normalize_url(data.get("homepage"))
+    if homepage and not _normalize_scholar(data.get("homepage")) and not _generic_homepage(data.get("homepage")):
+        identities.add(("homepage", homepage))
+    return identities
+
+
+def _norm_name_university(value: object) -> str:
+    return re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", _clean_str(value).lower())
+
+
+async def _fetch_professor(db: aiosqlite.Connection, prof_id: int) -> Optional[dict]:
+    cursor = await db.execute("SELECT * FROM professors WHERE id = ?", (prof_id,))
+    row = await cursor.fetchone()
+    return dict(row) if row else None
+
+
+async def _find_duplicate_professor(
+    db: aiosqlite.Connection,
+    data: dict,
+    exclude_id: Optional[int] = None,
+) -> Optional[dict]:
+    identities = _professor_identity_values(data)
+    if not identities:
+        return None
+    cursor = await db.execute("SELECT * FROM professors ORDER BY id ASC")
+    rows = [dict(r) for r in await cursor.fetchall()]
+    for row in rows:
+        if exclude_id is not None and row["id"] == exclude_id:
+            continue
+        if identities & _professor_identity_values(row):
+            return row
+    return None
+
+
+async def find_existing_professor_match(
+    data: dict,
+    exclude_id: Optional[int] = None,
+) -> Optional[dict]:
+    """Find an existing professor by strong identity or exact normalized name+university."""
+    db = await get_db()
+    try:
+        duplicate = await _find_duplicate_professor(db, data, exclude_id=exclude_id)
+        if duplicate:
+            return {"professor": duplicate, "reason": "email/google_scholar/homepage"}
+
+        name_key = _norm_name_university(data.get("name"))
+        university_key = _norm_name_university(data.get("university"))
+        if not name_key or not university_key:
+            return None
+
+        cursor = await db.execute("SELECT * FROM professors ORDER BY id ASC")
+        rows = [dict(r) for r in await cursor.fetchall()]
+        for row in rows:
+            if exclude_id is not None and row["id"] == exclude_id:
+                continue
+            if (
+                _norm_name_university(row.get("name")) == name_key
+                and _norm_name_university(row.get("university")) == university_key
+            ):
+                return {"professor": row, "reason": "name/university"}
+        return None
+    finally:
+        await db.close()
+
+
+def _parse_tags(raw: object) -> list[str]:
+    if isinstance(raw, list):
+        return [str(x) for x in raw if str(x).strip()]
+    if isinstance(raw, str) and raw.strip():
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                return [str(x) for x in parsed if str(x).strip()]
+        except Exception:
+            return []
+    return []
+
+
+def _merged_professor_update(keep: dict, incoming: dict) -> dict:
+    update: dict = {}
+
+    if _has_value(incoming.get("name")):
+        if not _has_value(keep.get("name")) or (_has_cjk(incoming.get("name")) and not _has_cjk(keep.get("name"))):
+            update["name"] = incoming["name"]
+
+    incoming_email = _valid_identity_email(incoming.get("email"))
+    keep_email = _valid_identity_email(keep.get("email"))
+    if incoming_email and not keep_email:
+        update["email"] = incoming["email"]
+
+    for field in ("university", "department", "google_scholar", "research_summary", "recent_papers", "region"):
+        if _has_value(incoming.get(field)) and not _has_value(keep.get(field)):
+            update[field] = incoming[field]
+
+    if _has_value(incoming.get("homepage")):
+        if not _has_value(keep.get("homepage")) or (_generic_homepage(keep.get("homepage")) and not _generic_homepage(incoming.get("homepage"))):
+            update["homepage"] = incoming["homepage"]
+
+    keep_tags = _parse_tags(keep.get("tags"))
+    incoming_tags = _parse_tags(incoming.get("tags"))
+    merged_tags = list(dict.fromkeys(keep_tags + incoming_tags))
+    if merged_tags != keep_tags:
+        update["tags"] = json.dumps(merged_tags, ensure_ascii=False)
+
+    if incoming.get("reply_status") and keep.get("reply_status", "no_reply") == "no_reply":
+        update["reply_status"] = incoming["reply_status"]
+
+    if incoming.get("is_starred") and not keep.get("is_starred"):
+        update["is_starred"] = 1
+
+    if incoming.get("source") == "manual" and keep.get("source") != "manual":
+        update["source"] = "manual"
+
+    return {k: v for k, v in update.items() if k in PROFESSOR_MERGE_FIELDS}
+
+
+async def _apply_professor_update(db: aiosqlite.Connection, prof_id: int, data: dict) -> None:
+    update = {k: v for k, v in data.items() if k in PROFESSOR_MERGE_FIELDS and v is not None}
+    if not update:
+        return
+    sets = [f"{k} = ?" for k in update]
+    vals = list(update.values()) + [prof_id]
+    await db.execute(f"UPDATE professors SET {', '.join(sets)} WHERE id = ?", vals)
+
+
+async def merge_professors(keep_id: int, drop_id: int) -> dict:
+    """Merge two duplicate professor rows, preserving drafts/replies on the kept row."""
+    if keep_id == drop_id:
+        return {"kept_id": keep_id, "dropped_id": drop_id, "merged": False}
+    db = await get_db()
+    try:
+        await db.execute("BEGIN")
+        keep = await _fetch_professor(db, keep_id)
+        drop = await _fetch_professor(db, drop_id)
+        if not keep or not drop:
+            await db.rollback()
+            return {"kept_id": keep_id, "dropped_id": drop_id, "merged": False, "reason": "missing row"}
+        update = _merged_professor_update(keep, drop)
+        await db.execute("UPDATE drafts SET professor_id = ? WHERE professor_id = ?", (keep_id, drop_id))
+        await db.execute("UPDATE replies SET professor_id = ? WHERE professor_id = ?", (keep_id, drop_id))
+        await db.execute("DELETE FROM professors WHERE id = ?", (drop_id,))
+        await _apply_professor_update(db, keep_id, update)
+        await db.commit()
+        return {
+            "kept_id": keep_id,
+            "dropped_id": drop_id,
+            "kept_name": update.get("name", keep.get("name")),
+            "dropped_name": drop.get("name"),
+            "merged": True,
+        }
+    except Exception:
+        await db.rollback()
+        raise
+    finally:
+        await db.close()
+
+
+async def dedupe_professors() -> list[dict]:
+    """Merge existing professors that share email, Google Scholar, or a non-generic homepage."""
+    merges: list[dict] = []
+    while True:
+        professors = await get_professors()
+        seen: dict[tuple[str, str], int] = {}
+        pending: Optional[tuple[int, int]] = None
+        for prof in sorted(professors, key=lambda p: p["id"]):
+            identities = _professor_identity_values(prof)
+            match_id = next((seen[i] for i in identities if i in seen and seen[i] != prof["id"]), None)
+            if match_id is not None:
+                pending = (match_id, prof["id"])
+                break
+            for identity in identities:
+                seen[identity] = prof["id"]
+        if not pending:
+            break
+        merges.append(await merge_professors(pending[0], pending[1]))
+    return merges
+
+
 async def create_professor(data: dict) -> dict:
     db = await get_db()
     try:
+        duplicate = await _find_duplicate_professor(db, data)
+        if duplicate:
+            update = _merged_professor_update(duplicate, data)
+            await _apply_professor_update(db, duplicate["id"], update)
+            await db.commit()
+            merged = await _fetch_professor(db, duplicate["id"])
+            return {**(merged or duplicate), "_deduped": True}
+
         cursor = await db.execute(
-            """INSERT OR IGNORE INTO professors
+            """INSERT INTO professors
                (name, email, university, department, homepage, google_scholar,
                 research_summary, recent_papers, region, source, tags)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
@@ -114,6 +397,19 @@ async def create_professor(data: dict) -> dict:
         await db.commit()
         prof_id = cursor.lastrowid
         return {**data, "id": prof_id}
+    except aiosqlite.IntegrityError:
+        email = data.get("email")
+        if email:
+            cursor = await db.execute("SELECT * FROM professors WHERE email = ?", (email,))
+            row = await cursor.fetchone()
+            if row:
+                existing = dict(row)
+                update = _merged_professor_update(existing, data)
+                await _apply_professor_update(db, existing["id"], update)
+                await db.commit()
+                merged = await _fetch_professor(db, existing["id"])
+                return {**(merged or existing), "_deduped": True}
+        raise
     finally:
         await db.close()
 
@@ -152,8 +448,15 @@ async def update_professor_reply_status(prof_id: int, status: str):
 async def delete_professor(prof_id: int):
     db = await get_db()
     try:
-        await db.execute("DELETE FROM professors WHERE id = ?", (prof_id,))
+        await db.execute("BEGIN")
+        await db.execute("DELETE FROM drafts WHERE professor_id = ?", (prof_id,))
+        await db.execute("DELETE FROM replies WHERE professor_id = ?", (prof_id,))
+        cursor = await db.execute("DELETE FROM professors WHERE id = ?", (prof_id,))
         await db.commit()
+        return cursor.rowcount > 0
+    except Exception:
+        await db.rollback()
+        raise
     finally:
         await db.close()
 
@@ -165,19 +468,35 @@ async def update_professor_info(prof_id: int, data: dict):
         allowed = {"name", "email", "university", "department", "homepage",
                    "google_scholar", "research_summary", "recent_papers",
                    "region", "tags"}
-        sets, vals = [], []
-        for k, v in data.items():
-            if k in allowed and v is not None:
-                sets.append(f"{k} = ?")
-                vals.append(v)
-        if sets:
-            vals.append(prof_id)
-            await db.execute(
-                f"UPDATE professors SET {', '.join(sets)} WHERE id = ?", vals
-            )
-            await db.commit()
+        update = {k: v for k, v in data.items() if k in allowed and v is not None}
+        if not update:
+            return
+
+        current = await _fetch_professor(db, prof_id)
+        if not current:
+            return
+
+        candidate = {**current, **update}
+        duplicate = await _find_duplicate_professor(db, candidate, exclude_id=prof_id)
+        if duplicate:
+            await db.close()
+            await merge_professors(prof_id, duplicate["id"])
+            db = await get_db()
+
+        await _apply_professor_update(db, prof_id, update)
+        await db.commit()
+
+        current = await _fetch_professor(db, prof_id)
+        duplicate = await _find_duplicate_professor(db, current or {}, exclude_id=prof_id) if current else None
+        if duplicate:
+            await db.close()
+            await merge_professors(prof_id, duplicate["id"])
+            return
     finally:
-        await db.close()
+        try:
+            await db.close()
+        except Exception:
+            pass
 
 
 async def toggle_star_professor(prof_id: int) -> bool:
@@ -213,6 +532,9 @@ async def update_professor_tags(prof_id: int, tags: list[str]) -> list[str]:
 async def create_draft(data: dict) -> dict:
     db = await get_db()
     try:
+        prof = await _fetch_professor(db, data["professor_id"])
+        if not prof:
+            raise ValueError(f"Professor {data['professor_id']} does not exist")
         cursor = await db.execute(
             """INSERT INTO drafts (professor_id, subject, body, language)
                VALUES (?, ?, ?, ?)""",
@@ -243,6 +565,24 @@ async def get_drafts(status: Optional[str] = None) -> list[dict]:
                    FROM drafts d JOIN professors p ON d.professor_id = p.id
                    ORDER BY d.created_at DESC"""
             )
+        rows = await cursor.fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        await db.close()
+
+
+async def get_draft_summaries() -> list[dict]:
+    """Lightweight draft metadata for list pages that only need per-professor status."""
+    db = await get_db()
+    try:
+        cursor = await db.execute(
+            """SELECT d.id, d.professor_id, d.subject, d.language, d.status,
+                      d.created_at, d.sent_at,
+                      p.name as professor_name, p.email as professor_email,
+                      p.university as professor_university
+               FROM drafts d JOIN professors p ON d.professor_id = p.id
+               ORDER BY d.created_at DESC"""
+        )
         rows = await cursor.fetchall()
         return [dict(r) for r in rows]
     finally:
@@ -286,8 +626,9 @@ async def update_draft(draft_id: int, data: dict):
 async def delete_draft(draft_id: int):
     db = await get_db()
     try:
-        await db.execute("DELETE FROM drafts WHERE id = ?", (draft_id,))
+        cursor = await db.execute("DELETE FROM drafts WHERE id = ?", (draft_id,))
         await db.commit()
+        return cursor.rowcount > 0
     finally:
         await db.close()
 

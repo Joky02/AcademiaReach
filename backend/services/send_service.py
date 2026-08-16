@@ -13,10 +13,7 @@ from typing import Optional
 
 from backend.core.llm import load_yaml_config
 from backend.core import database as db
-
-
-CV_DIR = Path(__file__).parent.parent / "config"
-PAPERS_DIR = CV_DIR / "papers"
+from backend.core.attachments import PAPERS_DIR, get_attachment_path, migrate_legacy_attachments
 
 
 def _get_smtp_config() -> dict:
@@ -26,16 +23,14 @@ def _get_smtp_config() -> dict:
 
 def _get_cv_path(language: str) -> Optional[Path]:
     """根据语言返回对应的简历文件路径"""
-    filename = "cv_cn.pdf" if language == "cn" else "cv_en.pdf"
-    path = CV_DIR / filename
-    return path if path.exists() else None
+    migrate_legacy_attachments()
+    return get_attachment_path("cv", "cn" if language == "cn" else "en")
 
 
 def _get_transcript_path(language: str) -> Optional[Path]:
     """根据语言返回对应的成绩单文件路径"""
-    filename = "transcript_cn.pdf" if language == "cn" else "transcript_en.pdf"
-    path = CV_DIR / filename
-    return path if path.exists() else None
+    migrate_legacy_attachments()
+    return get_attachment_path("transcript", "cn" if language == "cn" else "en")
 
 
 def _get_papers() -> list[Path]:

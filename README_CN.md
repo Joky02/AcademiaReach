@@ -24,7 +24,7 @@
 
 | 模块 | 功能 |
 |------|------|
-| **导师搜索** | LLM + Serper API 自动搜索海内外导师，支持自定义关键词 / 地区，也可手动添加 |
+| **导师搜索** | LLM + CSRankings + Serper API 自动搜索海内外导师，支持自定义关键词 / 地区，也可手动添加 |
 | **邮件撰写** | 根据导师研究方向 + 用户 Profile，LLM 生成个性化套磁邮件（中/英文自动切换） |
 | **邮件发送** | 草稿人工审核 → 编辑 → 确认发送（SMTP），支持附带中/英文 PDF 简历 |
 | **回复跟踪** | IMAP 轮询收件箱，双策略匹配导师回复（FROM 匹配 + 主题匹配），自动更新状态 |
@@ -63,7 +63,7 @@ AcademiaReach/
 │   │   ├── database.py          # SQLite 异步 CRUD
 │   │   └── llm.py               # LLM 统一接口（多后端切换）
 │   ├── agents/
-│   │   ├── search_agent.py      # 导师搜索 Agent（LLM 规划 + Serper 搜索 + 信息提取）
+│   │   ├── search_agent.py      # 导师搜索 Agent（LLM 规划 + CSRankings + Serper 搜索 + 信息提取）
 │   │   └── compose_agent.py     # 邮件撰写 Agent（中英文 Prompt + 自定义风格注入）
 │   ├── services/
 │   │   ├── send_service.py      # SMTP 邮件发送 + 简历附件
@@ -126,6 +126,8 @@ npm install        # 需要 Node.js >= 18
 ```bash
 cp backend/config/config.yaml.example backend/config/config.yaml
 cp backend/config/my_profile.example.md backend/config/my_profile.md
+mkdir -p backend/config/email_templates
+cp backend/templates/compose_en.example.md backend/config/email_templates/compose_en.md
 # 可选：如果要写自己的私有邮件 prompt，复制到被 git 忽略的本地覆盖目录
 mkdir -p backend/config/prompts
 cp backend/prompts/compose_cn.md backend/config/prompts/compose_cn.md
@@ -139,7 +141,9 @@ cp backend/prompts/compose_cn.md backend/config/prompts/compose_cn.md
 
 编辑 `backend/config/my_profile.md`，用 Markdown 填写你的研究背景、发表论文、技能等。
 
-`backend/prompts/*.md` 是可提交的通用 example prompt。若你需要固定邮件标题、写入真实姓名 / 学校 / 奖项 / 论文身份等个人信息，请只编辑 `backend/config/prompts/*.md` 中的本地覆盖文件；该目录已被 `.gitignore` 忽略，后端会优先读取本地覆盖文件。
+编辑 `backend/config/email_templates/compose_en.md`，填写英文邮件中固定的主题、开场、个人经历、结尾和落款。请保留三个 `{{ ... }}` 占位符，模型只负责导师称呼、代表作讨论段和研究匹配段。这个私有模板目录已被 Git 忽略。
+
+`backend/prompts/*.md` 是可提交的通用 example prompt。个人化的 prompt 覆盖只放在 `backend/config/prompts/*.md`；该目录已被 Git 忽略，并会优先于 example 加载。
 
 ### 5. 启动
 
@@ -221,7 +225,7 @@ prompts:
 ## 使用指南
 
 1. **Dashboard** — 查看导师总数、已发送、已回复等统计，以及实时搜索/生成日志
-2. **导师管理** — 点击"自动搜索"配置关键词和地区后启动 LLM+Serper 搜索，或手动添加导师；点击导师卡片查看详情
+2. **导师管理** — 点击"自动搜索"配置关键词和地区后启动 LLM+CSRankings+Serper 搜索，或手动添加导师；点击导师卡片查看详情
 3. **邮件草稿** — 点击"生成草稿"为所有未生成邮件的导师批量生成套磁邮件；可预览、编辑正文和主题、跳过不需要的
 4. **已发送** — 查看所有已发送邮件及发送时间
 5. **回复跟踪** — 系统每 5 分钟自动轮询 IMAP 收件箱（双策略：FROM 精确匹配 + SUBJECT 主题匹配），也可手动点击"检查回复"

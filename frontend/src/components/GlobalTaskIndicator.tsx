@@ -1,25 +1,27 @@
 import { useState } from 'react'
-import { Bot, Mail, Loader2, ChevronUp, ChevronDown, X, StopCircle, CheckCircle2 } from 'lucide-react'
+import { Bot, Mail, Loader2, ChevronUp, ChevronDown, X, StopCircle, CheckCircle2, RefreshCw } from 'lucide-react'
 
 export interface TaskState {
   searching: boolean
   searchLog: string[]
   composing: boolean
   composeLog: string[]
+  enriching: boolean
+  enrichLog: string[]
   onStopSearch: () => void
   onStopCompose: () => void
   onOpenSearchModal: () => void
 }
 
 export default function GlobalTaskIndicator({
-  searching, searchLog, composing, composeLog,
+  searching, searchLog, composing, composeLog, enriching, enrichLog,
   onStopSearch, onStopCompose, onOpenSearchModal,
 }: TaskState) {
   const [expanded, setExpanded] = useState(true)
   const [dismissed, setDismissed] = useState(false)
 
-  const hasActivity = searching || composing
-  const hasLogs = searchLog.length > 0 || composeLog.length > 0
+  const hasActivity = searching || composing || enriching
+  const hasLogs = searchLog.length > 0 || composeLog.length > 0 || enrichLog.length > 0
 
   // Nothing to show
   if (!hasActivity && !hasLogs) return null
@@ -30,6 +32,7 @@ export default function GlobalTaskIndicator({
 
   const lastSearchMsg = searchLog[searchLog.length - 1] || ''
   const lastComposeMsg = composeLog[composeLog.length - 1] || ''
+  const lastEnrichMsg = enrichLog[enrichLog.length - 1] || ''
 
   return (
     <div className="fixed bottom-6 right-6 z-40 flex flex-col items-end gap-2">
@@ -89,7 +92,7 @@ export default function GlobalTaskIndicator({
 
           {/* Compose task */}
           {(composing || composeLog.length > 0) && (
-            <div className="px-4 py-3">
+            <div className="px-4 py-3 border-b border-gray-50">
               <div className="flex items-center justify-between mb-1">
                 <div className="flex items-center gap-2">
                   {composing ? (
@@ -114,6 +117,27 @@ export default function GlobalTaskIndicator({
               <p className="text-[10px] text-gray-400 mt-0.5">{composeLog.length} 条日志</p>
             </div>
           )}
+
+          {/* Enrich task */}
+          {(enriching || enrichLog.length > 0) && (
+            <div className="px-4 py-3">
+              <div className="flex items-center justify-between mb-1">
+                <div className="flex items-center gap-2">
+                  {enriching ? (
+                    <Loader2 className="h-4 w-4 text-sky-500 animate-spin" />
+                  ) : (
+                    <CheckCircle2 className="h-4 w-4 text-green-500" />
+                  )}
+                  <span className="text-sm font-medium text-gray-800">
+                    {enriching ? '导师补全中' : '导师补全完成'}
+                  </span>
+                </div>
+                <RefreshCw className="h-3.5 w-3.5 text-gray-300" />
+              </div>
+              <p className="text-xs text-gray-500 truncate">{lastEnrichMsg}</p>
+              <p className="text-[10px] text-gray-400 mt-0.5">{enrichLog.length} 条日志</p>
+            </div>
+          )}
         </div>
       )}
 
@@ -129,7 +153,9 @@ export default function GlobalTaskIndicator({
               ? '搜索 + 生成中'
               : searching
               ? 'Agent 搜索中'
-              : '生成邮件中'}
+              : composing
+              ? '生成邮件中'
+              : '导师补全中'}
           </span>
           <ChevronUp className="h-3.5 w-3.5 ml-1" />
         </button>

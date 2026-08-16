@@ -6,6 +6,8 @@ from pathlib import Path
 
 PROMPT_DIR = Path(__file__).parent.parent / "prompts"
 LOCAL_PROMPT_DIR = Path(__file__).parent.parent / "config" / "prompts"
+EMAIL_TEMPLATE_DIR = Path(__file__).parent.parent / "templates"
+LOCAL_EMAIL_TEMPLATE_DIR = Path(__file__).parent.parent / "config" / "email_templates"
 
 # 模板名 -> 用途说明（前端展示用）
 PROMPT_DESCRIPTIONS: dict[str, str] = {
@@ -44,3 +46,13 @@ def save_prompt(name: str, content: str) -> None:
     LOCAL_PROMPT_DIR.mkdir(parents=True, exist_ok=True)
     path = LOCAL_PROMPT_DIR / f"{name}.md"
     path.write_text(content, encoding="utf-8")
+
+
+def load_email_template(name: str) -> str:
+    """Load a private email template first, then the commit-safe example."""
+    local_path = LOCAL_EMAIL_TEMPLATE_DIR / f"{name}.md"
+    example_path = EMAIL_TEMPLATE_DIR / f"{name}.example.md"
+    path = local_path if local_path.exists() else example_path
+    if not path.exists():
+        raise FileNotFoundError(f"Email template not found: {path}")
+    return path.read_text(encoding="utf-8")

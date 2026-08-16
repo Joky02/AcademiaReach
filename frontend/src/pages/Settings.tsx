@@ -287,7 +287,7 @@ export default function SettingsPage() {
 
   const handleCvUpload = async (lang: 'cn' | 'en', file: File | undefined) => {
     if (!file) return
-    setUploading(`cv_${lang}`)
+    setUploading(`cv-${lang}`)
     try {
       await uploadCv(lang, file)
       await refreshAttachments()
@@ -298,7 +298,7 @@ export default function SettingsPage() {
 
   const handleTranscriptUpload = async (lang: 'cn' | 'en', file: File | undefined) => {
     if (!file) return
-    setUploading(`transcript_${lang}`)
+    setUploading(`transcript-${lang}`)
     try {
       await uploadTranscript(lang, file)
       await refreshAttachments()
@@ -854,37 +854,37 @@ export default function SettingsPage() {
           <div className="rounded-lg border-2 border-dashed border-gray-200 p-5 text-center hover:border-indigo-300 transition-colors">
             <FileText className="mx-auto h-8 w-8 text-gray-400" />
             <p className="mt-2 text-sm font-medium text-gray-700">中文简历</p>
-            {cvStatus?.cv_cn?.uploaded ? (
-              <p className="text-xs text-green-600 mt-1">✓ 已上传 ({formatSize(cvStatus.cv_cn.size)})</p>
+            {cvStatus?.cv?.cn?.uploaded ? (
+              <p className="text-xs text-green-600 mt-1">✓ {cvStatus.cv.cn.name} ({formatSize(cvStatus.cv.cn.size)})</p>
             ) : (
               <p className="text-xs text-gray-400 mt-1">未上传</p>
             )}
             <input ref={cnFileRef} type="file" accept=".pdf" className="hidden" onChange={(e) => handleCvUpload('cn', e.target.files?.[0])} />
             <button
               onClick={() => cnFileRef.current?.click()}
-              disabled={uploading === 'cv_cn'}
+              disabled={uploading === 'cv-cn'}
               className="mt-3 inline-flex items-center gap-1.5 rounded-lg bg-indigo-50 px-4 py-2 text-sm font-medium text-indigo-600 hover:bg-indigo-100 disabled:opacity-50"
             >
-              {uploading === 'cv_cn' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
-              {cvStatus?.cv_cn?.uploaded ? '重新上传' : '上传 PDF'}
+              {uploading === 'cv-cn' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
+              {cvStatus?.cv?.cn?.uploaded ? '重新上传' : '上传 PDF'}
             </button>
           </div>
           <div className="rounded-lg border-2 border-dashed border-gray-200 p-5 text-center hover:border-indigo-300 transition-colors">
             <FileText className="mx-auto h-8 w-8 text-gray-400" />
             <p className="mt-2 text-sm font-medium text-gray-700">英文简历 (English CV)</p>
-            {cvStatus?.cv_en?.uploaded ? (
-              <p className="text-xs text-green-600 mt-1">✓ 已上传 ({formatSize(cvStatus.cv_en.size)})</p>
+            {cvStatus?.cv?.en?.uploaded ? (
+              <p className="text-xs text-green-600 mt-1">✓ {cvStatus.cv.en.name} ({formatSize(cvStatus.cv.en.size)})</p>
             ) : (
               <p className="text-xs text-gray-400 mt-1">未上传</p>
             )}
             <input ref={enFileRef} type="file" accept=".pdf" className="hidden" onChange={(e) => handleCvUpload('en', e.target.files?.[0])} />
             <button
               onClick={() => enFileRef.current?.click()}
-              disabled={uploading === 'cv_en'}
+              disabled={uploading === 'cv-en'}
               className="mt-3 inline-flex items-center gap-1.5 rounded-lg bg-indigo-50 px-4 py-2 text-sm font-medium text-indigo-600 hover:bg-indigo-100 disabled:opacity-50"
             >
-              {uploading === 'cv_en' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
-              {cvStatus?.cv_en?.uploaded ? '重新上传' : '上传 PDF'}
+              {uploading === 'cv-en' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
+              {cvStatus?.cv?.en?.uploaded ? '重新上传' : '上传 PDF'}
             </button>
           </div>
         </div>
@@ -895,37 +895,37 @@ export default function SettingsPage() {
           <div className="rounded-lg border-2 border-dashed border-gray-200 p-5 text-center hover:border-indigo-300 transition-colors">
             <FileText className="mx-auto h-8 w-8 text-gray-400" />
             <p className="mt-2 text-sm font-medium text-gray-700">中文成绩单</p>
-            {cvStatus?.transcript_cn?.uploaded ? (
-              <p className="text-xs text-green-600 mt-1">✓ 已上传 ({formatSize(cvStatus.transcript_cn.size)})</p>
+            {cvStatus?.transcript?.cn?.uploaded ? (
+              <p className="text-xs text-green-600 mt-1">✓ {cvStatus.transcript.cn.name} ({formatSize(cvStatus.transcript.cn.size)})</p>
             ) : (
               <p className="text-xs text-gray-400 mt-1">未上传</p>
             )}
             <input ref={tCnFileRef} type="file" accept=".pdf" className="hidden" onChange={(e) => handleTranscriptUpload('cn', e.target.files?.[0])} />
             <button
               onClick={() => tCnFileRef.current?.click()}
-              disabled={uploading === 'transcript_cn'}
+              disabled={uploading === 'transcript-cn'}
               className="mt-3 inline-flex items-center gap-1.5 rounded-lg bg-indigo-50 px-4 py-2 text-sm font-medium text-indigo-600 hover:bg-indigo-100 disabled:opacity-50"
             >
-              {uploading === 'transcript_cn' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
-              {cvStatus?.transcript_cn?.uploaded ? '重新上传' : '上传 PDF'}
+              {uploading === 'transcript-cn' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
+              {cvStatus?.transcript?.cn?.uploaded ? '重新上传' : '上传 PDF'}
             </button>
           </div>
           <div className="rounded-lg border-2 border-dashed border-gray-200 p-5 text-center hover:border-indigo-300 transition-colors">
             <FileText className="mx-auto h-8 w-8 text-gray-400" />
             <p className="mt-2 text-sm font-medium text-gray-700">英文成绩单 (Transcript)</p>
-            {cvStatus?.transcript_en?.uploaded ? (
-              <p className="text-xs text-green-600 mt-1">✓ 已上传 ({formatSize(cvStatus.transcript_en.size)})</p>
+            {cvStatus?.transcript?.en?.uploaded ? (
+              <p className="text-xs text-green-600 mt-1">✓ {cvStatus.transcript.en.name} ({formatSize(cvStatus.transcript.en.size)})</p>
             ) : (
               <p className="text-xs text-gray-400 mt-1">未上传</p>
             )}
             <input ref={tEnFileRef} type="file" accept=".pdf" className="hidden" onChange={(e) => handleTranscriptUpload('en', e.target.files?.[0])} />
             <button
               onClick={() => tEnFileRef.current?.click()}
-              disabled={uploading === 'transcript_en'}
+              disabled={uploading === 'transcript-en'}
               className="mt-3 inline-flex items-center gap-1.5 rounded-lg bg-indigo-50 px-4 py-2 text-sm font-medium text-indigo-600 hover:bg-indigo-100 disabled:opacity-50"
             >
-              {uploading === 'transcript_en' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
-              {cvStatus?.transcript_en?.uploaded ? '重新上传' : '上传 PDF'}
+              {uploading === 'transcript-en' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
+              {cvStatus?.transcript?.en?.uploaded ? '重新上传' : '上传 PDF'}
             </button>
           </div>
         </div>
@@ -1060,7 +1060,7 @@ export default function SettingsPage() {
             </div>
             <div className="p-6 space-y-4">
               <p className="text-sm text-gray-600">
-                AI 会读取已上传的 CV（优先中文版 <code className="rounded bg-gray-100 px-1">cv_cn.pdf</code>），结合你下方的补充说明，生成一份新的 Profile 草稿放进 textarea。<b>不会自动保存</b>——你可以再编辑后再点「保存」。
+                AI 会读取已上传的 CV（优先 <code className="rounded bg-gray-100 px-1">个人简历.pdf</code>），结合你下方的补充说明，生成一份新的 Profile 草稿放进 textarea。<b>不会自动保存</b>——你可以再编辑后再点「保存」。
               </p>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1.5">补充说明（可选，但强烈建议填）</label>

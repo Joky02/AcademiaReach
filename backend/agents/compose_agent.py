@@ -5,13 +5,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from typing import AsyncGenerator, Optional
 
 import httpx
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from backend.core.llm import get_llm, load_profile, load_yaml_config
-from backend.core.prompts import load_prompt
+from backend.core.prompts import load_email_template, load_prompt
 from backend.core import database as db
 
 logger = logging.getLogger(__name__)
@@ -73,6 +74,8 @@ async def _deep_research_professor(prof: dict, llm, serper_key: str) -> str:
     # 构造搜索查询
     queries = [
         f'"{name}" {university} publications papers',
+        f'"{name}" {university} Google Scholar citations',
+        f'"{name}" "{university}" "Cited by"',
         f'"{name}" {research.split(",")[0].strip() if research else ""} paper',
     ]
 
@@ -121,13 +124,26 @@ async def _deep_research_professor(prof: dict, llm, serper_key: str) -> str:
     lines = []
     papers = research_data.get("representative_papers", [])
     if papers:
+        def _citation_count(paper: dict) -> int:
+            value = paper.get("citation_count")
+            if isinstance(value, int):
+                return value
+            if isinstance(value, str):
+                match = re.search(r"\d[\d,]*", value)
+                if match:
+                    return int(match.group(0).replace(",", ""))
+            return -1
+
+        papers = sorted(papers, key=_citation_count, reverse=True)
         lines.append("### Representative Papers")
         for p in papers:
             title = p.get("title", "Unknown")
             venue = p.get("venue", "")
             year = p.get("year", "")
+            citation_count = _citation_count(p)
+            citation_text = f", citations: {citation_count}" if citation_count >= 0 else ""
             summary = p.get("summary", "")
-            lines.append(f"- **{title}** ({venue} {year}): {summary}")
+            lines.append(f"- **{title}** ({venue} {year}{citation_text}): {summary}")
 
     themes = research_data.get("research_themes", [])
     if themes:
@@ -153,6 +169,123 @@ def _detect_language(region: Optional[str]) -> str:
     if r in cn_keywords or "china" in r:
         return "cn"
     return "en"
+
+
+def _format_chinese_teacher_name(name: str) -> str:
+    """Return the name part used in 尊敬的X老师：."""
+    cleaned = re.sub(r"\s+", "", str(name or "")).strip()
+    cleaned = re.sub(r"(教授|老师)$", "", cleaned)
+    return cleaned
+
+
+def _strip_existing_chinese_salutation(paragraph: str) -> str:
+    """Remove model-generated greetings so the formatter can add one canonical line."""
+    text = paragraph.strip().lstrip("\u3000 ")
+    patterns = [
+        r"^尊敬的[^：:\n]{1,40}[：:]\s*",
+        r"^尊敬的[^，,。！？!\n]{1,40}老师\s*",
+        r"^[^，,。！？!\n]{1,40}老师您好[！!，,：:]?\s*",
+        r"^[^，,。！？!\n]{1,40}老师好[！!，,：:]?\s*",
+    ]
+    for pattern in patterns:
+        text = re.sub(pattern, "", text, count=1)
+    return text.strip()
+
+
+def _format_chinese_email_body(body: str, professor_name: str) -> str:
+    """Canonical Chinese email layout: salutation flush-left; paragraphs indented."""
+    teacher_name = _format_chinese_teacher_name(professor_name)
+    salutation = f"尊敬的{teacher_name}老师：" if teacher_name else "尊敬的老师："
+    raw = str(body or "").replace("\\n", "\n").replace("\r\n", "\n")
+    paragraphs = [
+        re.sub(r"\s*\n\s*", " ", p).strip()
+        for p in re.split(r"\n\s*\n+", raw)
+        if p.strip()
+    ]
+
+    formatted_paragraphs = []
+    for idx, paragraph in enumerate(paragraphs):
+        text = _strip_existing_chinese_salutation(paragraph) if idx == 0 else paragraph.strip().lstrip("\u3000 ")
+        if not text:
+            continue
+        formatted_paragraphs.append(f"\u3000\u3000{text}")
+
+    if not formatted_paragraphs:
+        return salutation
+    return salutation + "\n\n" + "\n\n".join(formatted_paragraphs)
+
+
+def _clean_english_paragraph(value: object) -> str:
+    """Collapse model output to one plain-text paragraph."""
+    text = str(value or "").replace("\\n", "\n").strip()
+    text = re.sub(r"\s*\n+\s*", " ", text)
+    text = re.sub(r"\s{2,}", " ", text)
+    return text.strip()
+
+
+def _clean_english_salutation(value: object, professor_name: str) -> str:
+    """Return only the name fragment used by `Dear Professor ...`."""
+    text = _clean_english_paragraph(value)
+    text = re.sub(r"^(?:dear\s+)?(?:professor|prof\.?|dr\.?)\s+", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"[,.:;]+$", "", text).strip()
+    if text:
+        return text
+
+    fallback = re.sub(
+        r"^(?:professor|prof\.?|dr\.?)\s+",
+        "",
+        str(professor_name or "").strip(),
+        flags=re.IGNORECASE,
+    )
+    return fallback.rstrip(",.:;").strip()
+
+
+def _render_english_email(
+    template: str,
+    email_data: dict,
+    professor_name: str,
+) -> tuple[str, str]:
+    """Render the private English template with only professor-specific fields."""
+    normalized = str(template or "").replace("\r\n", "\n").strip()
+    lines = normalized.splitlines()
+    if not lines or not lines[0].lower().startswith("subject:"):
+        raise ValueError("英文邮件模板第一行必须以 Subject: 开头")
+
+    subject = lines[0].split(":", 1)[1].strip()
+    body = "\n".join(lines[1:]).strip()
+    if not subject or not body:
+        raise ValueError("英文邮件模板缺少主题或正文")
+
+    replacements = {
+        "{{ professor_salutation }}": _clean_english_salutation(
+            email_data.get("salutation"),
+            professor_name,
+        ),
+        "{{ representative_work_paragraph }}": _clean_english_paragraph(
+            email_data.get("representative_work_paragraph")
+        ),
+        "{{ research_fit_paragraph }}": _clean_english_paragraph(
+            email_data.get("research_fit_paragraph")
+        ),
+    }
+    for placeholder, value in replacements.items():
+        if placeholder not in body:
+            raise ValueError(f"英文邮件模板缺少占位符：{placeholder}")
+        if not value:
+            raise ValueError(f"英文邮件生成结果缺少字段：{placeholder}")
+        body = body.replace(placeholder, value)
+
+    if "{{" in body or "}}" in body:
+        raise ValueError("英文邮件模板存在未解析占位符")
+    if re.search(r"\[(?:Applicant|Institution|Country|Degree|Program|Advisor|Venue|Project|Company)", subject + body):
+        raise ValueError("请先将英文 example 模板复制到本地并填写个人信息")
+
+    paragraphs = [
+        re.sub(r"[ \t]+\n", "\n", block).strip()
+        for block in re.split(r"\n\s*\n+", body)
+        if block.strip()
+    ]
+    return subject, "\n\n".join(paragraphs)
 
 
 async def compose_emails(
@@ -237,6 +370,8 @@ async def compose_emails(
         )
 
         if lang == "cn":
+            teacher_name = _format_chinese_teacher_name(prof["name"])
+            salutation_example = f"尊敬的{teacher_name}老师：" if teacher_name else "尊敬的老师："
             user_msg = f"""【导师基本信息】
 {prof_info}
 
@@ -249,13 +384,15 @@ async def compose_emails(
 请严格按 3 段自然段 + 1 段短签收的结构写一封中文套磁邮件。
 关键要求：
 - subject 使用「博士申请咨询：[具体研究方向]」格式，方括号内容换成申请者真实研究方向
+- body 第一行必须顶格写「{salutation_example}」；称呼之后空一行；后面每个自然段和签收段都必须以两个中文全角空格开头
 - 语言要像真人写给导师的短邮件：标准、清楚、克制；不要宣传稿口吻，不要 AI 套话，不要堆形容词
-- 第一段：身份 + 来意 + 把申请者**最强信号**亮出来；不要暴露弱点
+- 第一段：必须使用系统提示里的中文固定模板；不要再写「X老师您好」
 - 第二段：选一个最匹配的项目，只讲做了什么/结论/能力收获；硬技能用顿号串在句子里，**禁止 Bullet 列表**
-- 第三段（**最关键**）：从【导师研究参考资料】的 representative_papers 里**挑一篇最相关的论文**，说出论文标题或一句话内容，并接一句具体的想法或问题（让导师感到"这个学生真读过我的东西"）；然后说明这正是联系他的原因。**representative_papers 真为空时**才退化为一句方向概括，绝不编造论文标题
+- 第三段（**最关键**）：先从【申请者背景】和第二段判断申请者的硕士方向、已有论文方向或希望博士阶段继续研究的方向，再从【导师研究参考资料】的 representative_papers 里挑一篇最能接上的代表作；同一方向下优先选引用数更高的工作。不要生搬硬套：只有自然相关时才给一个轻量的结合想法；如果连接牵强，就只提出一个可请教、可交流的问题。第三段不要提申请者具体论文标题或方法名，不要写“我的论文/方法受到您这项工作的启发”。不要写得很强势，不要给太多细节，不要做确定性断言；用“也许、可能、希望进一步请教”这类低风险表达。**representative_papers 真为空时**才退化为一句方向概括，绝不编造论文标题
 - 签收：附简历 + 期待进一步交流 + 致谢 + 落款
-- 总字数 280-420 字；通篇散文"""
+- 总字数 360-480 字；通篇散文"""
         else:
+            english_template = load_email_template("compose_en")
             user_msg = f"""[Professor Info]
 {prof_info}
 
@@ -265,14 +402,17 @@ async def compose_emails(
 [Applicant Background]
 {profile}
 
-Write a cold email strictly as 3 content paragraphs + 1 short sign-off. Flowing prose only.
+[Fixed Email Template (for context only; do not repeat its fixed paragraphs)]
+{english_template}
+
+Write only the three JSON fields requested by the system prompt. The backend will insert them into the fixed template.
 Key requirements:
 - Use standard written academic English with no contractions. Keep it simple, concrete, and human; avoid AI-like phrasing, ornate adjectives, and generic admiration.
-- Paragraph 1: identity, intent, AND surface the applicant's strongest signal. Never expose weaknesses.
-- Paragraph 2: pick ONE most-relevant project; outcome + capabilities only, never process. Weave 3-4 skills into a sentence. NO bullets.
-- Paragraph 3 (**the differentiator**): pick ONE paper from the [Research Reference] representative_papers, name it (title or a one-line description), then add a concrete thought or question about it — make the professor feel you actually read it. Then state that the alignment is why you are writing. **Only fall back to a direction summary if representative_papers is genuinely empty — never fabricate a paper title.**
-- Sign-off: attached CV, offer to discuss, thanks, signature.
-- Total 180-250 words. Plain prose throughout — no bullets, no lists, no Markdown, no AI clichés."""
+- representative_work_paragraph: infer the applicant's direction, then choose ONE naturally related representative work. Among similarly relevant works, prefer the more-cited one. Give one modest directional connection, without mentioning the applicant's paper title or method name and without claiming inspiration.
+- research_fit_paragraph: state one future direction connected to the group and end by asking whether the applicant's background could fit.
+- salutation: return only the reliable family-name form used after "Dear Professor".
+- Never fabricate a paper title. If evidence is weak, discuss a verified direction instead.
+- Do not repeat any sentence already present in the fixed template. No bullets, lists, Markdown, or AI clichés."""
 
         try:
             response = await llm.ainvoke([
@@ -286,12 +426,21 @@ Key requirements:
                 content = content.rsplit("```", 1)[0]
 
             email_data = json.loads(content)
-            subject = email_data.get("subject", f"PhD Application - {prof['name']}")
+            if lang == "cn":
+                subject = email_data.get("subject", f"PhD Application - {prof['name']}")
+                body = email_data.get("body", "")
+                body = _format_chinese_email_body(body, prof["name"])
+            else:
+                subject, body = _render_english_email(
+                    english_template,
+                    email_data,
+                    prof["name"],
+                )
 
             draft = await db.create_draft({
                 "professor_id": prof["id"],
                 "subject": subject,
-                "body": email_data.get("body", ""),
+                "body": body,
                 "language": lang,
             })
             total_created += 1

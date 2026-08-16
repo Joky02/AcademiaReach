@@ -3,10 +3,11 @@ import {
   Search, Trash2, ExternalLink, Loader2, UserPlus, Globe,
   MapPin, Building2, Mail, FileText, Send, ChevronDown, ChevronRight, Bot,
   Star, Tag, Plus, X, RefreshCw, GraduationCap, Filter,
+  AlertCircle,
 } from 'lucide-react'
 import {
-  getProfessors, addProfessor, deleteProfessor, getDrafts,
-  toggleStar, updateProfTags, enrichProfessor,
+  getProfessors, addProfessor, deleteProfessor, getDraftSummaries,
+  toggleStar, updateProfTags, startEnrichProfessor, getEnrichStatus,
 } from '../services/api'
 import ProfessorDetail from '../components/ProfessorDetail'
 import { nameToGradient, getInitials } from '../utils/avatar'
@@ -64,7 +65,10 @@ const regionRank = (region: string) => {
 const parseTags = (raw: any): string[] => {
   if (Array.isArray(raw)) return raw
   if (typeof raw === 'string') {
-    try { return JSON.parse(raw) } catch { return [] }
+    try {
+      const parsed = JSON.parse(raw)
+      return Array.isArray(parsed) ? parsed.map((x) => String(x)).filter(Boolean) : []
+    } catch { return [] }
   }
   return []
 }
@@ -87,6 +91,7 @@ export default function Professors({
   const [professors, setProfessors] = useState<any[]>([])
   const [draftsMap, setDraftsMap] = useState<Record<number, any[]>>({})
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
 
   // Track newly added professor IDs (during this session)
   const [newProfIds, setNewProfIds] = useState<Set<number>>(new Set())
@@ -103,6 +108,7 @@ export default function Professors({
 
   // Collapsed regions
   const [collapsedRegions, setCollapsedRegions] = useState<Set<string>>(new Set())
+  const [collapseInitialized, setCollapseInitialized] = useState(false)
   const [activeRegion, setActiveRegion] = useState<string>('all')
   const [query, setQuery] = useState('')
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
@@ -113,22 +119,59 @@ export default function Professors({
   // Enriching professors (loading state)
   const [enrichingIds, setEnrichingIds] = useState<Set<number>>(new Set())
 
+  const toProfessorId = (value: any) => {
+    const id = Number(value)
+    return Number.isFinite(id) ? id : null
+  }
+
+  const syncEnrichStatus = () => {
+    getEnrichStatus()
+      .then((res) => {
+        const ids = Array.isArray(res.data?.active_ids) ? res.data.active_ids : []
+        const activeIds: number[] = ids.map((id: any) => Number(id)).filter((id: number) => Number.isFinite(id))
+        const active = new Set<number>(activeIds)
+        setEnrichingIds((prev) => {
+          const next = new Set<number>(Array.from(prev).filter((id) => active.has(id)))
+          const finished = next.size !== prev.size
+          if (finished) window.setTimeout(fetchData, 0)
+          return next
+        })
+      })
+      .catch(() => {})
+  }
+
   const fetchData = () => {
-    Promise.all([getProfessors(), getDrafts()])
+    setLoadError(null)
+    Promise.all([getProfessors(), getDraftSummaries()])
       .then(([profRes, draftRes]) => {
-        setProfessors(profRes.data)
+        const profs = Array.isArray(profRes.data) ? profRes.data : []
+        setProfessors(profs)
         // Build professor_id → drafts map
         const dm: Record<number, any[]> = {}
-        for (const d of draftRes.data) {
+        for (const d of Array.isArray(draftRes.data) ? draftRes.data : []) {
           if (!dm[d.professor_id]) dm[d.professor_id] = []
           dm[d.professor_id].push(d)
         }
         setDraftsMap(dm)
+        if (!collapseInitialized) {
+          const regions = Array.from(new Set(profs.map((p: any) => normalizeRegion(p.region))))
+          setCollapsedRegions(new Set(regions))
+          setCollapseInitialized(true)
+        }
+      })
+      .catch((e) => {
+        setLoadError(e?.response?.data?.detail || e?.message || '导师数据加载失败')
       })
       .finally(() => setLoading(false))
   }
 
   useEffect(() => { fetchData() }, [])
+
+  useEffect(() => {
+    syncEnrichStatus()
+    const timer = window.setInterval(syncEnrichStatus, 4000)
+    return () => window.clearInterval(timer)
+  }, [])
 
   // Listen for search/compose WebSocket messages — track new professors & refresh data
   useEffect(() => {
@@ -143,6 +186,16 @@ export default function Professors({
     }
     if (latest.channel === 'compose') {
       if (latest.type === 'done' || latest.type === 'draft') fetchData()
+    }
+    if (latest.channel === 'enrich') {
+      const profId = toProfessorId(latest.professor_id)
+      if (latest.type === 'progress' && profId !== null) {
+        setEnrichingIds((prev) => new Set(prev).add(profId))
+      }
+      if ((latest.type === 'done' || latest.type === 'error') && profId !== null) {
+        fetchData()
+        setEnrichingIds((prev) => { const s = new Set(prev); s.delete(profId); return s })
+      }
     }
   }, [wsMessages])
 
@@ -233,13 +286,12 @@ export default function Professors({
     setShowAdd(false)
     fetchData()
     // Auto-enrich in background
-    const newId = res.data?.id
-    if (newId) {
+    const newId = toProfessorId(res.data?.id)
+    if (newId !== null) {
       setEnrichingIds((prev) => new Set(prev).add(newId))
-      enrichProfessor(newId)
-        .then(() => fetchData())
-        .catch(() => {})
-        .finally(() => setEnrichingIds((prev) => { const s = new Set(prev); s.delete(newId); return s }))
+      startEnrichProfessor(newId).catch(() => {
+        setEnrichingIds((prev) => { const s = new Set(prev); s.delete(newId); return s })
+      })
     }
   }
 
@@ -252,12 +304,14 @@ export default function Professors({
 
   const handleEnrich = async (e: React.MouseEvent, id: number) => {
     e.stopPropagation()
-    setEnrichingIds((prev) => new Set(prev).add(id))
+    const profId = toProfessorId(id)
+    if (profId === null) return
+    setEnrichingIds((prev) => new Set(prev).add(profId))
     try {
-      await enrichProfessor(id)
-      fetchData()
-    } catch { /* ignore */ }
-    setEnrichingIds((prev) => { const s = new Set(prev); s.delete(id); return s })
+      await startEnrichProfessor(profId)
+    } catch {
+      setEnrichingIds((prev) => { const s = new Set(prev); s.delete(profId); return s })
+    }
   }
 
   const handleToggleStar = async (e: React.MouseEvent, id: number) => {
@@ -290,6 +344,15 @@ export default function Professors({
     setCollapsedRegions((prev) => {
       const next = new Set(prev)
       next.has(region) ? next.delete(region) : next.add(region)
+      return next
+    })
+  }
+
+  const focusRegion = (region: string) => {
+    setActiveRegion(region)
+    setCollapsedRegions((prev) => {
+      const next = new Set(prev)
+      next.delete(region)
       return next
     })
   }
@@ -411,7 +474,7 @@ export default function Professors({
           {regionSummary.map(({ region, count, universityCount, pendingEmail }) => (
             <button
               key={region}
-              onClick={() => setActiveRegion(region)}
+              onClick={() => focusRegion(region)}
               className={`shrink-0 rounded-lg border px-3 py-2 text-left transition-colors ${
                 activeRegion === region
                   ? 'border-indigo-500 bg-indigo-50 text-indigo-700'
@@ -468,6 +531,18 @@ export default function Professors({
       {loading ? (
         <div className="flex items-center justify-center p-12">
           <Loader2 className="h-8 w-8 animate-spin text-indigo-500" />
+        </div>
+      ) : loadError ? (
+        <div className="rounded-xl bg-white p-12 text-center shadow-sm border border-red-100">
+          <AlertCircle className="mx-auto h-12 w-12 text-red-300" />
+          <p className="mt-4 text-sm font-medium text-red-600">导师数据加载失败</p>
+          <p className="mt-1 text-xs text-gray-400">{loadError}</p>
+          <button
+            onClick={() => { setLoading(true); fetchData() }}
+            className="mt-4 rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm text-gray-700 hover:bg-gray-50"
+          >
+            重新加载
+          </button>
         </div>
       ) : professors.length === 0 ? (
         <div className="rounded-xl bg-white p-16 text-center shadow-sm border border-gray-100">
@@ -704,21 +779,14 @@ export default function Professors({
       )}
 
       {/* Professor detail modal */}
-      <ProfessorDetail
-        professor={selectedProf}
-        onClose={() => { setSelectedProf(null); fetchData() }}
-        onUpdate={() => {
-          fetchData()
-          // Refresh selectedProf with latest data
-          if (selectedProf) {
-            getProfessors().then((res) => {
-              const updated = res.data.find((p: any) => p.id === selectedProf.id)
-              if (updated) setSelectedProf(updated)
-            })
-          }
-        }}
-        wsMessages={wsMessages}
-      />
+      {selectedProf && (
+        <ProfessorDetail
+          professor={selectedProf}
+          onClose={() => { setSelectedProf(null); fetchData() }}
+          onUpdate={fetchData}
+          wsMessages={wsMessages}
+        />
+      )}
     </div>
   )
 }

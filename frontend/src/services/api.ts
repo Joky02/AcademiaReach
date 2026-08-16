@@ -10,6 +10,7 @@ export const getStats = () => api.get('/stats')
 
 // ── Professors ───────────────────────────────────────
 export const getProfessors = () => api.get('/professors')
+export const getProfessor = (id: number) => api.get(`/professors/${id}`)
 export const addProfessor = (data: any) => api.post('/professors', data)
 export const deleteProfessor = (id: number, blacklist = true) =>
   api.delete(`/professors/${id}`, { params: { blacklist } })
@@ -22,12 +23,15 @@ export const toggleStar = (id: number) => api.put(`/professors/${id}/star`)
 export const updateProfTags = (id: number, tags: string[]) =>
   api.put(`/professors/${id}/tags`, { tags })
 export const enrichProfessor = (id: number) => api.post(`/professors/${id}/enrich`)
+export const startEnrichProfessor = (id: number) => api.post(`/professors/${id}/enrich/start`)
+export const getEnrichStatus = () => api.get('/professors/enrich/status')
 export const startSearch = (data: any) => api.post('/search/start', data)
 export const stopSearch = () => api.post('/search/stop')
 
 // ── Drafts ───────────────────────────────────────────
 export const getDrafts = (status?: string) =>
   api.get('/drafts', { params: status ? { status } : {} })
+export const getDraftSummaries = () => api.get('/drafts/summary')
 export const getDraft = (id: number) => api.get(`/drafts/${id}`)
 export const updateDraft = (id: number, data: any) => api.put(`/drafts/${id}`, data)
 export const deleteDraft = (id: number) => api.delete(`/drafts/${id}`)

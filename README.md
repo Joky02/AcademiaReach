@@ -24,7 +24,7 @@
 
 | Module | Description |
 |--------|-------------|
-| **Professor Search** | LLM + Serper API auto-discovers professors worldwide; supports custom keywords / regions and manual entry |
+| **Professor Search** | LLM + CSRankings + Serper API auto-discovers professors worldwide; supports custom keywords / regions and manual entry |
 | **Deep Research** | Before composing, automatically searches for each professor's representative papers and analyzes them with LLM |
 | **Email Composition** | LLM generates personalized cold emails based on professor's research + your profile (auto CN/EN switching) |
 | **Email Sending** | Human-reviewed drafts → edit → confirm → send via SMTP, with optional CN/EN PDF CV attachment |
@@ -64,7 +64,7 @@ AcademiaReach/
 │   │   ├── database.py          # Async SQLite CRUD
 │   │   └── llm.py               # Unified LLM interface (multi-backend)
 │   ├── agents/
-│   │   ├── search_agent.py      # Professor Search Agent (LLM planning + Serper + extraction)
+│   │   ├── search_agent.py      # Professor Search Agent (LLM planning + CSRankings + Serper + extraction)
 │   │   └── compose_agent.py     # Email Compose Agent (Deep Research + CN/EN prompts + custom style)
 │   ├── services/
 │   │   ├── send_service.py      # SMTP email sending + CV attachment
@@ -128,6 +128,8 @@ npm install        # Requires Node.js >= 18
 ```bash
 cp backend/config/config.yaml.example backend/config/config.yaml
 cp backend/config/my_profile.example.md backend/config/my_profile.md
+mkdir -p backend/config/email_templates
+cp backend/templates/compose_en.example.md backend/config/email_templates/compose_en.md
 # Optional: create private local prompt overrides ignored by Git
 mkdir -p backend/config/prompts
 cp backend/prompts/compose_cn.md backend/config/prompts/compose_cn.md
@@ -141,7 +143,9 @@ Edit `backend/config/config.yaml` and fill in:
 
 Edit `backend/config/my_profile.md` with your research background, publications, skills, etc. in Markdown.
 
-`backend/prompts/*.md` contains commit-safe example prompts. If you want to add a fixed email subject or personal details such as your real name, institution, awards, or publication status, edit only the local override files under `backend/config/prompts/*.md`. That directory is ignored by Git, and the backend loads local overrides before the example prompts.
+Edit `backend/config/email_templates/compose_en.md` to set the fixed English subject, introduction, background, closing, and signature. Keep the three `{{ ... }}` placeholders unchanged; the model fills only the professor salutation, representative-work paragraph, and research-fit paragraph. This private template directory is ignored by Git.
+
+`backend/prompts/*.md` contains commit-safe example prompts. Put personal prompt overrides only under `backend/config/prompts/*.md`; the directory is ignored by Git and takes precedence over the examples.
 
 ### 5. Launch
 
@@ -223,7 +227,7 @@ Upload CN/EN PDF CVs in the Settings page. When sending emails, the system autom
 ## Usage Guide
 
 1. **Dashboard** — View stats (total professors, sent, replied) and live search/compose logs
-2. **Professors** — Click "Auto Search" to configure keywords and regions, then let LLM+Serper find professors; or add manually. Click a professor card for details
+2. **Professors** — Click "Auto Search" to configure keywords and regions, then let LLM+CSRankings+Serper find professors; or add manually. Click a professor card for details
 3. **Drafts** — Click "Generate Drafts" to batch-compose emails for all professors without drafts. Deep Research runs automatically for each professor before composing. Preview, edit subject/body, or skip as needed
 4. **Sent** — View all sent emails and timestamps
 5. **Replies** — System polls IMAP every 5 minutes (dual strategy: FROM exact match + SUBJECT match). You can also click "Check Replies" manually
