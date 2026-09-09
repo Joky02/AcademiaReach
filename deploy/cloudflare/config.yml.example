@@ -4,7 +4,7 @@ protocol: http2
 
 ingress:
   - hostname: taoci.example.com
-    service: http://127.0.0.1:8080
+    service: http://web:8080
     originRequest:
       httpHostHeader: localhost:8080
       connectTimeout: 10s

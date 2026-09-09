@@ -1,14 +1,14 @@
 # Docker 与 Cloudflare Tunnel 部署
 
-本方案与 `gold` 项目使用同类结构：本地管理 Named Tunnel，Tunnel JSON 凭据通过 Docker Secret 挂载，`cloudflared` 与 Nginx 共享网络命名空间。
+本方案使用本地管理的 Named Tunnel。Tunnel JSON 凭据通过 Docker Secret 挂载，`cloudflared` 通过 Compose 内部网络访问 Nginx。
 
 ```text
-Browser -> Cloudflare Access -> Cloudflare Tunnel -> 127.0.0.1:8080
+Browser -> Cloudflare Access -> Cloudflare Tunnel -> web:8080
                                                        |-- React
                                                        `-- /api -> backend:8000
 ```
 
-Nginx 只监听容器网络命名空间内的 `127.0.0.1:8080`，Compose 不向宿主机发布端口。因此公网访问不能绕过 Cloudflare Access。Taoci 必须使用独立 Tunnel，不能复用其他项目的 Tunnel UUID 或凭据。
+Nginx 只监听 Compose 内部网络中的 `8080` 端口，Compose 不向宿主机发布端口。因此公网访问不能绕过 Cloudflare Access。每套部署应使用独立 Tunnel，不能复用其他项目的 Tunnel UUID 或凭据。
 
 ## 1. 准备应用
 
@@ -79,7 +79,7 @@ TAOCI_CODEX_SOCKET_DIR=/tmp/taoci-codex-1000
 TAOCI_PI_SOCKET_DIR=/tmp/taoci-pi-1000
 ```
 
-`CLOUDFLARED_USER` 应与 credentials JSON 的所有者一致，可通过 `id -u` 和 `id -g` 查看。默认 WSL 用户通常为 `1000:1000`。
+`CLOUDFLARED_USER` 应与 credentials JSON 的所有者一致，可通过 `id -u` 和 `id -g` 查看。许多 WSL 环境的默认用户是 `1000:1000`，请以命令输出为准。
 
 生产环境的浏览器请求与 API 同源，不需要把公网域名加入 CORS。`TAOCI_ALLOWED_ORIGINS` 只用于 Vite 本地开发。
 

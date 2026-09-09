@@ -75,7 +75,6 @@ services:
     restart: unless-stopped
     profiles:
       - tunnel
-    network_mode: service:web
     depends_on:
       web:
         condition: service_healthy
