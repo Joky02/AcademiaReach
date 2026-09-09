@@ -136,10 +136,11 @@ start_worker() {
   rm -f "${PID_FILE}" "${SOCKET_PATH}"
   (
     cd "${ROOT}"
+    # Codex account refresh tokens are single-use; serialize App Server sessions.
     PYTHONUNBUFFERED=1 setsid "${VENV_DIR}/bin/python" -u -m codex_worker.server \
       --socket "${SOCKET_PATH}" \
       --workspace "${WORKSPACE_DIR}" \
-      --concurrency "${TAOCI_CODEX_CONCURRENCY:-4}" \
+      --concurrency "${TAOCI_CODEX_CONCURRENCY:-1}" \
       </dev/null >"${LOG_FILE}" 2>&1 &
     echo "$!" > "${PID_FILE}"
   )

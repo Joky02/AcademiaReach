@@ -100,17 +100,14 @@ async def _send(writer: asyncio.StreamWriter, payload: dict[str, Any]) -> None:
 class CodexWorker:
     def __init__(
         self,
-        codex: AsyncCodex,
         workspace: Path,
         concurrency: int,
         model: str | None,
     ) -> None:
-        self.codex = codex
         self.workspace = workspace
         self.concurrency = concurrency
         self.semaphore = asyncio.Semaphore(concurrency)
         self.model = model
-        self.fresh_app_server_required = False
 
     async def handle(
         self,
@@ -209,56 +206,16 @@ class CodexWorker:
             thread_config["tools"] = {
                 "web_search": {"context_size": profile["web_context_size"]}
             }
-        if self.fresh_app_server_required:
-            await self._run_with_fresh_codex(
-                request_id,
-                prompt,
-                harness,
-                output_schema,
-                requested_model,
-                writer,
-                profile,
-                thread_config,
-            )
-            return
-
-        try:
-            await self._run_with_codex(
-                self.codex,
-                request_id,
-                prompt,
-                harness,
-                output_schema,
-                requested_model,
-                writer,
-                profile,
-                thread_config,
-            )
-        except Exception as exc:
-            if not _is_stale_configuration_error(exc):
-                raise
-            self.fresh_app_server_required = True
-            LOGGER.warning(
-                "Codex App Server configuration became stale; retrying with a fresh process"
-            )
-            await _send(
-                writer,
-                {
-                    "id": request_id,
-                    "type": "progress",
-                    "message": "Codex 配置已变化，正在重新加载 Agent",
-                },
-            )
-            await self._run_with_fresh_codex(
-                request_id,
-                prompt,
-                harness,
-                output_schema,
-                requested_model,
-                writer,
-                profile,
-                thread_config,
-            )
+        await self._run_with_fresh_codex(
+            request_id,
+            prompt,
+            harness,
+            output_schema,
+            requested_model,
+            writer,
+            profile,
+            thread_config,
+        )
 
     async def _run_with_fresh_codex(
         self,
@@ -406,22 +363,20 @@ async def serve(args: argparse.Namespace) -> None:
         with suppress(NotImplementedError):
             loop.add_signal_handler(sig, stop_event.set)
 
-    async with AsyncCodex() as codex:
-        worker = CodexWorker(
-            codex=codex,
-            workspace=workspace,
-            concurrency=max(1, args.concurrency),
-            model=args.model or None,
-        )
-        server = await asyncio.start_unix_server(
-            worker.handle,
-            path=str(socket_path),
-            limit=MAX_REQUEST_BYTES + 1,
-        )
-        os.chmod(socket_path, 0o660)
-        LOGGER.info("Codex worker listening on %s", socket_path)
-        async with server:
-            await stop_event.wait()
+    worker = CodexWorker(
+        workspace=workspace,
+        concurrency=max(1, args.concurrency),
+        model=args.model or None,
+    )
+    server = await asyncio.start_unix_server(
+        worker.handle,
+        path=str(socket_path),
+        limit=MAX_REQUEST_BYTES + 1,
+    )
+    os.chmod(socket_path, 0o660)
+    LOGGER.info("Codex worker listening on %s", socket_path)
+    async with server:
+        await stop_event.wait()
 
     with suppress(FileNotFoundError):
         socket_path.unlink()

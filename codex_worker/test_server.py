@@ -47,13 +47,9 @@ class CodexWorkerRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_retries_stale_app_server_with_fresh_process(self) -> None:
         worker = CodexWorker(
-            codex=MagicMock(),
             workspace=Path("/tmp"),
             concurrency=2,
             model=None,
-        )
-        stale = RuntimeError(
-            "failed to load configuration: No such file or directory (os error 2)"
         )
         fresh_codex = object()
         writer = MagicMock()
@@ -64,7 +60,7 @@ class CodexWorkerRecoveryTests(unittest.IsolatedAsyncioTestCase):
             patch.object(
                 worker,
                 "_run_with_codex",
-                new=AsyncMock(side_effect=[stale, None]),
+                new=AsyncMock(return_value=None),
             ) as run_with_codex,
             patch(
                 "codex_worker.server.AsyncCodex",
@@ -80,13 +76,11 @@ class CodexWorkerRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 writer,
             )
 
-        self.assertTrue(worker.fresh_app_server_required)
-        self.assertEqual(run_with_codex.await_count, 2)
-        self.assertIs(run_with_codex.await_args_list[1].args[0], fresh_codex)
+        run_with_codex.assert_awaited_once()
+        self.assertIs(run_with_codex.await_args.args[0], fresh_codex)
 
     async def test_retries_transient_fresh_process_initialization(self) -> None:
         worker = CodexWorker(
-            codex=MagicMock(),
             workspace=Path("/tmp"),
             concurrency=2,
             model=None,
