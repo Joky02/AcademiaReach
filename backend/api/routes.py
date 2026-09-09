@@ -1096,6 +1096,9 @@ class EmailConfig(BaseModel):
     imap_username: str
     imap_password: str
     imap_use_ssl: bool = True
+    imap_proxy_enabled: bool = False
+    imap_proxy_host: str = "host.docker.internal"
+    imap_proxy_port: int = 10809
     save: bool = False  # 验证通过后是否保存到 config.yaml
 
 
@@ -1125,6 +1128,9 @@ async def get_email_config():
             "username": imap.get("username", ""),
             "password_set": bool(imap.get("password", "")),
             "use_ssl": imap.get("use_ssl", True),
+            "proxy_enabled": imap.get("proxy_enabled", smtp.get("proxy_enabled", False)),
+            "proxy_host": imap.get("proxy_host", smtp.get("proxy_host", "host.docker.internal")),
+            "proxy_port": imap.get("proxy_port", smtp.get("proxy_port", 10809)),
         },
     }
 
@@ -1132,7 +1138,7 @@ async def get_email_config():
 @router.post("/config/email/verify")
 async def verify_email(data: EmailConfig):
     """验证 SMTP 和 IMAP 连接"""
-    import imaplib
+    from backend.services.imap_client import create_imap_client
     from backend.services.smtp_client import create_smtp_client
 
     results = {"smtp": {"ok": False, "message": ""}, "imap": {"ok": False, "message": ""}}
@@ -1182,10 +1188,14 @@ async def verify_email(data: EmailConfig):
     else:
         try:
             def verify_imap_connection() -> None:
-                if data.imap_use_ssl:
-                    mail = imaplib.IMAP4_SSL(data.imap_host, data.imap_port, timeout=10)
-                else:
-                    mail = imaplib.IMAP4(data.imap_host, data.imap_port, timeout=10)
+                mail = create_imap_client({
+                    "host": data.imap_host,
+                    "port": data.imap_port,
+                    "use_ssl": data.imap_use_ssl,
+                    "proxy_enabled": data.imap_proxy_enabled,
+                    "proxy_host": data.imap_proxy_host,
+                    "proxy_port": data.imap_proxy_port,
+                }, timeout=10)
                 try:
                     mail.login(data.imap_username, imap_password)
                 finally:
@@ -1216,7 +1226,11 @@ async def verify_email(data: EmailConfig):
         cfg["imap"] = {
             "host": data.imap_host, "port": data.imap_port,
             "username": data.imap_username, "password": imap_password,
-            "use_ssl": data.imap_use_ssl, "poll_interval": 300,
+            "use_ssl": data.imap_use_ssl,
+            "proxy_enabled": data.imap_proxy_enabled,
+            "proxy_host": data.imap_proxy_host.strip(),
+            "proxy_port": data.imap_proxy_port,
+            "poll_interval": current_imap.get("poll_interval", 300),
         }
         with open(CONFIG_PATH, "w", encoding="utf-8") as f:
             yaml.dump(cfg, f, allow_unicode=True, default_flow_style=False, sort_keys=False)

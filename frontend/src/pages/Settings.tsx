@@ -92,6 +92,7 @@ export default function SettingsPage() {
     smtp_from_name: '', smtp_cc: '',
     smtp_proxy_enabled: false, smtp_proxy_host: 'host.docker.internal', smtp_proxy_port: 10809,
     imap_host: '', imap_port: 993, imap_username: '', imap_password: '', imap_use_ssl: true,
+    imap_proxy_enabled: false, imap_proxy_host: 'host.docker.internal', imap_proxy_port: 10809,
   })
   const [showSmtpPwd, setShowSmtpPwd] = useState(false)
   const [showImapPwd, setShowImapPwd] = useState(false)
@@ -145,6 +146,8 @@ export default function SettingsPage() {
           smtp_proxy_enabled: !!s.proxy_enabled,
           smtp_proxy_host: s.proxy_host || 'host.docker.internal', smtp_proxy_port: s.proxy_port || 10809,
           imap_host: im.host, imap_port: im.port, imap_username: im.username, imap_use_ssl: im.use_ssl,
+          imap_proxy_enabled: !!im.proxy_enabled,
+          imap_proxy_host: im.proxy_host || 'host.docker.internal', imap_proxy_port: im.proxy_port || 10809,
         }))
         setPromptForm(promptRes.data)
         const tpls = (tplRes.data || []) as PromptTpl[]
@@ -819,6 +822,25 @@ export default function SettingsPage() {
                   className="rounded border-gray-300 text-indigo-600" />
                 使用 SSL
               </label>
+              <label className="flex items-center gap-2 text-xs text-gray-600">
+                <input type="checkbox" checked={emailForm.imap_proxy_enabled} onChange={(e) => setEmailForm({ ...emailForm, imap_proxy_enabled: e.target.checked })}
+                  className="rounded border-gray-300 text-indigo-600" />
+                通过 HTTP 代理连接 IMAP
+              </label>
+              {emailForm.imap_proxy_enabled && (
+                <div className="grid grid-cols-3 gap-2">
+                  <div className="col-span-2">
+                    <label className="block text-xs text-gray-500 mb-1">代理地址</label>
+                    <input value={emailForm.imap_proxy_host} onChange={(e) => setEmailForm({ ...emailForm, imap_proxy_host: e.target.value })}
+                      placeholder="host.docker.internal" className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500" />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1">代理端口</label>
+                    <input type="number" value={emailForm.imap_proxy_port} onChange={(e) => setEmailForm({ ...emailForm, imap_proxy_port: parseInt(e.target.value) || 10809 })}
+                      className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500" />
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         </div>

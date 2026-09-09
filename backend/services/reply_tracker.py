@@ -14,6 +14,7 @@ import re
 
 from backend.core.llm import load_yaml_config
 from backend.core import database as db
+from backend.services.imap_client import create_imap_client
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +28,11 @@ _reply_check_lock: asyncio.Lock | None = None
 
 def _get_imap_config() -> dict:
     cfg = load_yaml_config()
-    return cfg.get("imap", {})
+    imap_cfg = dict(cfg.get("imap", {}) or {})
+    smtp_cfg = cfg.get("smtp", {}) or {}
+    for key in ("proxy_enabled", "proxy_host", "proxy_port"):
+        imap_cfg.setdefault(key, smtp_cfg.get(key))
+    return imap_cfg
 
 
 def _decode_header_value(value: str) -> str:
@@ -170,11 +175,7 @@ async def _check_replies_blocking() -> list[dict]:
     new_replies = []
 
     try:
-        if imap_cfg.get("use_ssl", True):
-            mail = imaplib.IMAP4_SSL(imap_cfg["host"], imap_cfg.get("port", 993))
-        else:
-            mail = imaplib.IMAP4(imap_cfg["host"], imap_cfg.get("port", 143))
-
+        mail = create_imap_client(imap_cfg, timeout=20)
         mail.login(imap_cfg["username"], imap_cfg["password"])
         mail.select("INBOX")
 

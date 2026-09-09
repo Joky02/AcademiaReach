@@ -147,6 +147,9 @@ class IMAPConfig(BaseModel):
     username: str = ""
     password: str = ""
     use_ssl: bool = True
+    proxy_enabled: bool = False
+    proxy_host: str = "host.docker.internal"
+    proxy_port: int = 10809
     poll_interval: int = 300
 
 
