@@ -6,7 +6,7 @@ import asyncio
 import email
 import imaplib
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from email.header import decode_header
 from typing import Optional
 
@@ -21,6 +21,8 @@ logger = logging.getLogger(__name__)
 _EMAIL_RE = re.compile(r'^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$')
 _REPLY_PREFIX_RE = re.compile(r"^\s*(?:(?:re|fw|fwd|回复|答复)\s*[:：]\s*)+", re.IGNORECASE)
 MAX_SUBJECT_SCAN = 500
+SUBJECT_FETCH_BATCH = 50
+_reply_check_lock: asyncio.Lock | None = None
 
 
 def _get_imap_config() -> dict:
@@ -96,6 +98,32 @@ def _message_bytes(fetch_result: list) -> bytes | None:
     return None
 
 
+def _message_payloads(fetch_result: list) -> list[tuple[bytes, bytes]]:
+    payloads: list[tuple[bytes, bytes]] = []
+    for item in fetch_result:
+        if not isinstance(item, tuple) or len(item) < 2 or not isinstance(item[1], bytes):
+            continue
+        match = re.match(rb"(\d+)\s", item[0]) if isinstance(item[0], bytes) else None
+        if match:
+            payloads.append((match.group(1), item[1]))
+    return payloads
+
+
+def _imap_since_date(sent_drafts: list[dict]) -> str:
+    parsed_dates: list[datetime] = []
+    for draft in sent_drafts:
+        value = str(draft.get("sent_at") or "").strip()
+        if not value:
+            continue
+        try:
+            parsed_dates.append(datetime.fromisoformat(value).replace(tzinfo=None))
+        except ValueError:
+            continue
+    floor = datetime.utcnow() - timedelta(days=365)
+    earliest = min(parsed_dates, default=floor) - timedelta(days=7)
+    return max(earliest, floor).strftime("%d-%b-%Y")
+
+
 async def _check_replies_blocking() -> list[dict]:
     """
     检查收件箱中是否有导师的回复邮件。
@@ -139,11 +167,7 @@ async def _check_replies_blocking() -> list[dict]:
         logger.info("没有可用于回复检查的导师邮箱或已发送邮件")
         return []
 
-    # 建 professor id → professor 的快查表
-    prof_by_id = {p["id"]: p for p in professors}
-
     new_replies = []
-    matched_msg_ids = set()  # 避免同一封邮件被两个策略重复匹配
 
     try:
         if imap_cfg.get("use_ssl", True):
@@ -154,73 +178,59 @@ async def _check_replies_blocking() -> list[dict]:
         mail.login(imap_cfg["username"], imap_cfg["password"])
         mail.select("INBOX")
 
-        # ── 策略 1：按 FROM 匹配 ──
-        for prof_email, prof in prof_email_map.items():
-            if prof["id"] in replied_prof_ids:
-                continue
-            try:
-                _, msg_nums = mail.search(None, f'(FROM "{prof_email}")')
-                if not msg_nums[0]:
-                    continue
-                for num in msg_nums[0].split():
-                    if num in matched_msg_ids:
+        # 批量读取最近邮件头，在本地同时执行 FROM 和 SUBJECT 匹配。
+        try:
+            _, all_msg_nums = mail.search(None, "SINCE", _imap_since_date(sent_drafts))
+            recent_nums = all_msg_nums[0].split()[-MAX_SUBJECT_SCAN:] if all_msg_nums and all_msg_nums[0] else []
+            for end in range(len(recent_nums), 0, -SUBJECT_FETCH_BATCH):
+                batch = recent_nums[max(0, end - SUBJECT_FETCH_BATCH):end]
+                message_set = ",".join(num.decode("ascii") for num in batch)
+                _, header_data = mail.fetch(
+                    message_set,
+                    "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT)])",
+                )
+                for num, raw_header in reversed(_message_payloads(header_data)):
+                    header = email.message_from_bytes(raw_header)
+                    subject = _decode_header_value(header.get("Subject", "")).strip()
+                    from_addresses = {
+                        address.casefold()
+                        for _, address in email.utils.getaddresses([header.get("From", "")])
+                        if address
+                    }
+                    direct_professor = next(
+                        (prof_email_map[address] for address in from_addresses if address in prof_email_map),
+                        None,
+                    )
+                    prof_id = int(direct_professor["id"]) if direct_professor else None
+                    match_strategy = "FROM" if direct_professor else "SUBJECT"
+                    if prof_id is None:
+                        base_subject = _base_subject(subject)
+                        has_reply_prefix = base_subject != subject.casefold()
+                        prof_id = subject_prof_map.get(base_subject) if has_reply_prefix else None
+                    if not prof_id or prof_id in replied_prof_ids:
                         continue
-                    matched_msg_ids.add(num)
-                    _, msg_data = mail.fetch(num, "(RFC822)")
-                    msg = email.message_from_bytes(msg_data[0][1])
-                    parsed = _parse_msg(msg)
-                    reply_data = {"professor_id": prof["id"], **parsed}
+
+                    _, msg_data = mail.fetch(num, "(BODY.PEEK[])")
+                    raw_message = _message_bytes(msg_data)
+                    if not raw_message:
+                        continue
+                    parsed = _parse_msg(email.message_from_bytes(raw_message))
+                    reply_data = {"professor_id": prof_id, **parsed}
                     try:
                         saved = await db.create_reply(reply_data)
                         new_replies.append(saved)
-                        await db.update_professor_reply_status(prof["id"], "replied")
-                        replied_prof_ids.add(prof["id"])
+                        await db.update_professor_reply_status(prof_id, "replied")
+                        replied_prof_ids.add(prof_id)
+                        logger.info(
+                            "[%s] 匹配到回复: prof_id=%s, subject=%s",
+                            match_strategy,
+                            prof_id,
+                            subject[:50],
+                        )
                     except Exception:
-                        pass
-            except Exception as e:
-                logger.error(f"[FROM] 检查 {prof_email} 的回复时出错: {e}")
-
-        # ── 策略 2：读取最近邮件头，在本地匹配 SUBJECT ──
-        try:
-            _, all_msg_nums = mail.search(None, "ALL")
-            recent_nums = all_msg_nums[0].split()[-MAX_SUBJECT_SCAN:] if all_msg_nums and all_msg_nums[0] else []
-            for num in reversed(recent_nums):
-                if num in matched_msg_ids:
-                    continue
-                _, header_data = mail.fetch(num, "(BODY.PEEK[HEADER.FIELDS (SUBJECT)])")
-                raw_header = _message_bytes(header_data)
-                if not raw_header:
-                    continue
-                header = email.message_from_bytes(raw_header)
-                subject = _decode_header_value(header.get("Subject", "")).strip()
-                base_subject = _base_subject(subject)
-                if base_subject == subject.casefold():
-                    continue
-                prof_id = subject_prof_map.get(base_subject)
-                if not prof_id or prof_id in replied_prof_ids:
-                    continue
-
-                _, msg_data = mail.fetch(num, "(BODY.PEEK[])")
-                raw_message = _message_bytes(msg_data)
-                if not raw_message:
-                    continue
-                parsed = _parse_msg(email.message_from_bytes(raw_message))
-                matched_msg_ids.add(num)
-                reply_data = {"professor_id": prof_id, **parsed}
-                try:
-                    saved = await db.create_reply(reply_data)
-                    new_replies.append(saved)
-                    await db.update_professor_reply_status(prof_id, "replied")
-                    replied_prof_ids.add(prof_id)
-                    logger.info(
-                        "[SUBJECT] 匹配到回复: prof_id=%s, subject=%s",
-                        prof_id,
-                        subject[:50],
-                    )
-                except Exception:
-                    logger.exception("[SUBJECT] 保存回复失败: prof_id=%s", prof_id)
+                        logger.exception("保存回复失败: prof_id=%s", prof_id)
         except Exception as e:
-            logger.error(f"[SUBJECT] 检查主题匹配时出错: {e}")
+            logger.error(f"检查回复邮件头时出错: {e}")
 
         mail.logout()
 
@@ -238,7 +248,11 @@ def _run_reply_check() -> list[dict]:
 
 async def check_replies() -> list[dict]:
     """Run synchronous IMAP work outside the FastAPI event loop."""
-    return await asyncio.to_thread(_run_reply_check)
+    global _reply_check_lock
+    if _reply_check_lock is None:
+        _reply_check_lock = asyncio.Lock()
+    async with _reply_check_lock:
+        return await asyncio.to_thread(_run_reply_check)
 
 
 async def start_reply_polling():

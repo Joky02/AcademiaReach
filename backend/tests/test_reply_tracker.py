@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import unittest
+from datetime import datetime, timedelta
 from unittest.mock import patch
 
 from backend.services import reply_tracker
@@ -18,6 +19,23 @@ class ReplyTrackerTests(unittest.IsolatedAsyncioTestCase):
             reply_tracker._base_subject("回复：博士申请咨询：可靠智能体"),
             "博士申请咨询：可靠智能体",
         )
+
+    def test_extracts_message_numbers_from_batched_fetch(self):
+        payloads = reply_tracker._message_payloads([
+            (b"41 (BODY[HEADER.FIELDS (SUBJECT)] {20}", b"Subject: Re: Hello\r\n\r\n"),
+            b")",
+            (b"42 (BODY[HEADER.FIELDS (SUBJECT)] {18}", b"Subject: Re: Hi\r\n\r\n"),
+        ])
+        self.assertEqual([number for number, _ in payloads], [b"41", b"42"])
+
+    def test_imap_scan_starts_before_earliest_sent_draft(self):
+        sent_at = (datetime.utcnow() - timedelta(days=20)).isoformat()
+        since = datetime.strptime(
+            reply_tracker._imap_since_date([{"sent_at": sent_at}]),
+            "%d-%b-%Y",
+        )
+        self.assertGreaterEqual(since, datetime.utcnow() - timedelta(days=28))
+        self.assertLessEqual(since, datetime.utcnow() - timedelta(days=26))
 
     async def test_check_replies_runs_outside_event_loop_thread(self):
         event_loop_thread = threading.get_ident()
