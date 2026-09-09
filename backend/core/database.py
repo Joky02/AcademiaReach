@@ -584,6 +584,12 @@ async def update_professor_tags(prof_id: int, tags: list[str]) -> list[str]:
 
 # ── Draft CRUD ────────────────────────────────────────
 
+def _draft_dict(row: aiosqlite.Row) -> dict:
+    draft = dict(row)
+    draft.pop("is_read", None)
+    return draft
+
+
 async def create_draft(data: dict) -> dict:
     db = await get_db()
     try:
@@ -621,7 +627,7 @@ async def get_drafts(status: Optional[str] = None) -> list[dict]:
                    ORDER BY d.created_at DESC"""
             )
         rows = await cursor.fetchall()
-        return [dict(r) for r in rows]
+        return [_draft_dict(r) for r in rows]
     finally:
         await db.close()
 
@@ -644,6 +650,37 @@ async def get_draft_summaries() -> list[dict]:
         await db.close()
 
 
+async def get_draft_review_rows(status: Optional[str] = "pending") -> list[dict]:
+    """Return drafts with the professor metadata needed by the review scorer."""
+    db = await get_db()
+    try:
+        where = "WHERE d.status = ?" if status else ""
+        params = (status,) if status else ()
+        cursor = await db.execute(
+            f"""SELECT d.*, p.name AS professor_name,
+                       p.email AS professor_email,
+                       p.university AS professor_university,
+                       p.department AS professor_department,
+                       p.region AS professor_region,
+                       p.research_summary,
+                       p.recent_papers,
+                       p.recommended_papers,
+                       p.tags AS professor_tags,
+                       p.reply_status,
+                       p.is_starred,
+                       (SELECT COUNT(*) FROM replies r WHERE r.professor_id = p.id) AS reply_count
+                FROM drafts d
+                JOIN professors p ON d.professor_id = p.id
+                {where}
+                ORDER BY d.created_at DESC, d.id DESC""",
+            params,
+        )
+        rows = await cursor.fetchall()
+        return [_draft_dict(row) for row in rows]
+    finally:
+        await db.close()
+
+
 async def get_draft(draft_id: int) -> Optional[dict]:
     db = await get_db()
     try:
@@ -654,7 +691,7 @@ async def get_draft(draft_id: int) -> Optional[dict]:
             (draft_id,),
         )
         row = await cursor.fetchone()
-        return dict(row) if row else None
+        return _draft_dict(row) if row else None
     finally:
         await db.close()
 

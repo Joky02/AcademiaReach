@@ -888,6 +888,48 @@ async def _recommend_papers_for_professor(
         return []
 
 
+async def recommend_papers_for_professor(
+    prof_id: int,
+    progress: Optional[Callable[[str], Awaitable[None]]] = None,
+) -> dict[str, Any]:
+    """Refresh only paper recommendations, without overwriting professor metadata."""
+    from backend.core import database as db_mod
+
+    async def emit(message: str) -> None:
+        if progress:
+            await progress(message)
+
+    prof = await db_mod.get_professor(prof_id)
+    if not prof:
+        return {"success": False, "message": "导师不存在"}
+
+    llm = get_llm()
+    if not is_harness_llm(llm):
+        return {"success": False, "message": "论文推荐需要 Codex 或 Pi Harness"}
+
+    await emit(f"正在检索 {prof['name']} 的代表作")
+    recommendations = await _recommend_papers_for_professor(prof, llm, emit)
+    if not recommendations:
+        return {"success": False, "message": "未找到可核验的推荐论文"}
+
+    await db_mod.update_professor_info(
+        prof_id,
+        {
+            "recommended_papers": json.dumps(
+                recommendations,
+                ensure_ascii=False,
+            )
+        },
+    )
+    await emit(f"已保存 {len(recommendations)} 篇可核验推荐论文")
+    return {
+        "success": True,
+        "professor_id": prof_id,
+        "count": len(recommendations),
+        "recommended_papers": recommendations,
+    }
+
+
 # ── 单个导师信息补全 ──────────────────────────────────
 
 

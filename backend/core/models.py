@@ -134,6 +134,11 @@ class SMTPConfig(BaseModel):
     username: str = ""
     password: str = ""
     use_tls: bool = True
+    from_name: str = ""
+    cc: str = ""
+    proxy_enabled: bool = False
+    proxy_host: str = "host.docker.internal"
+    proxy_port: int = 10809
 
 
 class IMAPConfig(BaseModel):

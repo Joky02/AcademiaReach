@@ -2,18 +2,20 @@
 
 from __future__ import annotations
 
-import os
+import asyncio
 import smtplib
 from datetime import datetime
 from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from email.utils import formataddr, formatdate, getaddresses, make_msgid
 from pathlib import Path
 from typing import Optional
 
 from backend.core.llm import load_yaml_config
 from backend.core import database as db
 from backend.core.attachments import PAPERS_DIR, get_attachment_path, migrate_legacy_attachments
+from backend.services.smtp_client import create_smtp_client, describe_smtp_connection_error
 
 
 def _get_smtp_config() -> dict:
@@ -40,6 +42,11 @@ def _get_papers() -> list[Path]:
     return sorted(p for p in PAPERS_DIR.iterdir() if p.is_file() and p.suffix.lower() == ".pdf")
 
 
+def _parse_recipients(value: str) -> list[str]:
+    """Parse a comma-separated address field and discard malformed entries."""
+    return [address for _, address in getaddresses([value]) if "@" in address]
+
+
 def _attach_pdf(msg: MIMEMultipart, path: Path) -> None:
     """把一个 PDF 文件挂到 mime message 上"""
     with open(path, "rb") as f:
@@ -48,7 +55,25 @@ def _attach_pdf(msg: MIMEMultipart, path: Path) -> None:
         msg.attach(part)
 
 
-async def send_email(draft_id: int) -> dict:
+def _deliver_message(
+    smtp_cfg: dict,
+    from_email: str,
+    recipients: list[str],
+    message: str,
+) -> dict:
+    """Perform blocking SMTP I/O outside the FastAPI event loop."""
+    server = create_smtp_client(smtp_cfg)
+    try:
+        server.login(from_email, smtp_cfg["password"])
+        return server.sendmail(from_email, recipients, message)
+    finally:
+        try:
+            server.quit()
+        except Exception:
+            server.close()
+
+
+async def send_email(draft_id: int, include_cc: bool = False) -> dict:
     """
     发送单封邮件。
 
@@ -68,12 +93,20 @@ async def send_email(draft_id: int) -> dict:
 
     to_email = draft["professor_email"]
     from_email = smtp_cfg["username"]
+    cc_emails = _parse_recipients(smtp_cfg.get("cc", "")) if include_cc else []
+    if include_cc and not cc_emails:
+        return {"success": False, "message": "已选择抄送，但尚未配置有效的抄送地址"}
 
     # 构建邮件（mixed 类型以支持附件）
     msg = MIMEMultipart("mixed")
     msg["Subject"] = draft["subject"]
-    msg["From"] = f"{smtp_cfg.get('from_name', '')} <{from_email}>"
+    from_name = smtp_cfg.get("from_name", "").strip()
+    msg["From"] = formataddr((from_name, from_email)) if from_name else from_email
     msg["To"] = to_email
+    msg["Date"] = formatdate(localtime=True)
+    msg["Message-ID"] = make_msgid(domain=from_email.rpartition("@")[2] or None)
+    if cc_emails:
+        msg["Cc"] = ", ".join(cc_emails)
     msg.attach(MIMEText(draft["body"], "plain", "utf-8"))
 
     # 附件：简历 + 成绩单（按导师所在地区选中/英）+ 论文（papers/ 全部）
@@ -88,15 +121,21 @@ async def send_email(draft_id: int) -> dict:
         _attach_pdf(msg, paper_path)
 
     try:
-        if smtp_cfg.get("use_tls", True):
-            server = smtplib.SMTP(smtp_cfg["host"], smtp_cfg.get("port", 587))
-            server.starttls()
-        else:
-            server = smtplib.SMTP_SSL(smtp_cfg["host"], smtp_cfg.get("port", 465))
+        refused = await asyncio.to_thread(
+            _deliver_message,
+            smtp_cfg,
+            from_email,
+            [to_email, *cc_emails],
+            msg.as_string(),
+        )
 
-        server.login(from_email, smtp_cfg["password"])
-        server.sendmail(from_email, to_email, msg.as_string())
-        server.quit()
+        refused_by_address = {address.lower(): reason for address, reason in refused.items()}
+        if to_email.lower() in refused_by_address:
+            code, detail = refused_by_address[to_email.lower()]
+            return {
+                "success": False,
+                "message": f"导师邮箱被服务器拒收: ({code}) {detail!r}",
+            }
 
         # 更新草稿状态
         await db.update_draft(draft_id, {
@@ -104,21 +143,29 @@ async def send_email(draft_id: int) -> dict:
             "sent_at": datetime.utcnow().isoformat(),
         })
 
+        refused_cc = [address for address in cc_emails if address.lower() in refused_by_address]
+        if refused_cc:
+            return {
+                "success": True,
+                "message": f"邮件已发送至导师，但抄送地址被拒收: {', '.join(refused_cc)}",
+            }
         return {"success": True, "message": f"邮件已成功发送至 {to_email}"}
 
     except smtplib.SMTPAuthenticationError:
         return {"success": False, "message": "SMTP 认证失败，请检查邮箱密码/授权码"}
     except smtplib.SMTPException as e:
         return {"success": False, "message": f"SMTP 发送错误: {e}"}
+    except OSError as e:
+        return {"success": False, "message": describe_smtp_connection_error(e, smtp_cfg)}
     except Exception as e:
         return {"success": False, "message": f"发送失败: {e}"}
 
 
-async def send_batch(draft_ids: list[int]) -> list[dict]:
+async def send_batch(draft_ids: list[int], include_cc: bool = False) -> list[dict]:
     """批量发送邮件"""
     results = []
     for did in draft_ids:
-        result = await send_email(did)
+        result = await send_email(did, include_cc=include_cc)
         result["draft_id"] = did
         results.append(result)
     return results

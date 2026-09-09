@@ -82,7 +82,7 @@ def _parse_msg(msg: email.message.Message) -> dict:
     return {"subject": subject, "body": body[:5000], "received_at": received_at}
 
 
-async def check_replies() -> list[dict]:
+async def _check_replies_blocking() -> list[dict]:
     """
     检查收件箱中是否有导师的回复邮件。
     双策略匹配：
@@ -213,6 +213,15 @@ async def check_replies() -> list[dict]:
         logger.error(f"回复检查出错: {e}")
 
     return new_replies
+
+
+def _run_reply_check() -> list[dict]:
+    return asyncio.run(_check_replies_blocking())
+
+
+async def check_replies() -> list[dict]:
+    """Run synchronous IMAP work outside the FastAPI event loop."""
+    return await asyncio.to_thread(_run_reply_check)
 
 
 async def start_reply_polling():

@@ -33,16 +33,33 @@ export const getSearchStatus = () => api.get('/search/status')
 export const getDrafts = (status?: string) =>
   api.get('/drafts', { params: status ? { status } : {} })
 export const getDraftSummaries = () => api.get('/drafts/summary')
+export const getDraftReview = (status?: string) =>
+  api.get('/drafts/review', { params: { status: status || '' } })
 export const getDraft = (id: number) => api.get(`/drafts/${id}`)
 export const updateDraft = (id: number, data: any) => api.put(`/drafts/${id}`, data)
 export const deleteDraft = (id: number) => api.delete(`/drafts/${id}`)
-export const startCompose = (professorIds?: number[]) =>
-  api.post('/compose/start', { professor_ids: professorIds || null })
+export const startCompose = (
+  professorIds?: number[],
+  replaceExisting = false,
+  runDeepResearch = true,
+  parallelism = 1,
+) =>
+  api.post('/compose/start', {
+    professor_ids: professorIds || null,
+    replace_existing: replaceExisting,
+    run_deep_research: runDeepResearch,
+    parallelism,
+  })
+export const getComposeStatus = () => api.get('/compose/status')
+export const startPaperRecommendations = (professorIds: number[]) =>
+  api.post('/paper-recommendations/start', { professor_ids: professorIds })
+export const getPaperRecommendationStatus = () => api.get('/paper-recommendations/status')
 
 // ── Send ─────────────────────────────────────────────
-export const sendEmail = (draftId: number) => api.post(`/send/${draftId}`)
-export const sendBatch = (draftIds: number[]) =>
-  api.post('/send/batch', { draft_ids: draftIds })
+export const sendEmail = (draftId: number, includeCc = false) =>
+  api.post(`/send/${draftId}`, { include_cc: includeCc })
+export const sendBatch = (draftIds: number[], includeCc = false) =>
+  api.post('/send/batch', { draft_ids: draftIds, include_cc: includeCc })
 
 // ── Replies ──────────────────────────────────────────
 export const getReplies = () => api.get('/replies')

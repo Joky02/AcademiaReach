@@ -94,9 +94,12 @@ def _compose_output_schema(lang: str) -> dict:
         ["subject", "body"]
         if lang == "cn"
         else [
+            "subject",
             "salutation",
+            "representative_work_title",
             "representative_work_paragraph",
-            "research_fit_paragraph",
+            "background_bridge_paragraph",
+            "fit_close_paragraph",
         ]
     )
     return {
@@ -119,11 +122,31 @@ def _stored_recommended_papers(prof: dict) -> list[dict]:
     return [item for item in raw[:5] if isinstance(item, dict) and item.get("title")]
 
 
+def _recommendation_impact_key(paper: dict) -> tuple[int, int, int]:
+    citation_count = paper.get("citation_count")
+    citations = citation_count if isinstance(citation_count, int) else -1
+    venue = str(paper.get("venue") or "").lower()
+    if "nature" in venue or venue == "science":
+        venue_rank = 4
+    elif any(name in venue for name in ("cell", "pnas", "neurips", "icml", "iclr", "acl", "kdd")):
+        venue_rank = 3
+    elif venue and "arxiv" not in venue and "biorxiv" not in venue:
+        venue_rank = 2
+    else:
+        venue_rank = 1 if venue else 0
+    year = paper.get("year")
+    return citations, venue_rank, year if isinstance(year, int) else 0
+
+
 def _format_stored_recommendations(prof: dict) -> str:
-    papers = _stored_recommended_papers(prof)
+    papers = sorted(
+        _stored_recommended_papers(prof),
+        key=_recommendation_impact_key,
+        reverse=True,
+    )
     if not papers:
         return ""
-    lines = ["已保存的个性化推荐论文（需要再次核验，不要盲目照抄）："]
+    lines = ["已保存的个性化推荐论文（按可核验影响力优先展示，仍需判断方向是否自然相关）："]
     for paper in papers:
         citation_count = paper.get("citation_count")
         metadata_parts = [
@@ -280,6 +303,24 @@ def _format_chinese_email_body(body: str, professor_name: str) -> str:
     return salutation + "\n\n" + "\n\n".join(formatted_paragraphs)
 
 
+def _validate_chinese_email_body(body: str, professor: dict) -> None:
+    """Reject structurally unsafe or untraceable Chinese drafts."""
+    teacher_name = _format_chinese_teacher_name(professor.get("name", ""))
+    expected_salutation = f"尊敬的{teacher_name}老师："
+    blocks = [block for block in re.split(r"\n\s*\n+", body or "") if block.strip()]
+    if not body.startswith(expected_salutation):
+        raise ValueError("中文邮件称呼与导师姓名不一致")
+    if len(blocks) != 5:
+        raise ValueError(f"中文邮件必须是称呼、三段正文和签收，共 5 个文本块；当前为 {len(blocks)} 个")
+    if any(not block.startswith("\u3000\u3000") for block in blocks[1:]):
+        raise ValueError("中文邮件正文和签收必须缩进两个全角空格")
+    if re.search(r"(?:^|\n)\s*(?:[-*]|\d+[.、])\s+|\*\*|```", body):
+        raise ValueError("中文邮件不得包含列表或 Markdown")
+
+    titles = [str(paper["title"]).strip() for paper in _stored_recommended_papers(professor)]
+    if titles and not any(title and title in body for title in titles):
+        raise ValueError("中文邮件没有逐字使用已核验的推荐论文标题")
+
 def _clean_english_paragraph(value: object) -> str:
     """Collapse model output to one plain-text paragraph."""
     text = str(value or "").replace("\\n", "\n").strip()
@@ -305,6 +346,57 @@ def _clean_english_salutation(value: object, professor_name: str) -> str:
     return fallback.rstrip(",.:;").strip()
 
 
+def _clean_english_subject(value: object) -> str:
+    text = _clean_english_paragraph(value)
+    text = re.sub(r"^subject\s*:\s*", "", text, flags=re.IGNORECASE).strip()
+    if not text:
+        raise ValueError("英文邮件生成结果缺少个性化主题")
+    if len(text) > 160:
+        raise ValueError("英文邮件主题过长")
+    return text
+
+
+def _ensure_explicit_paper_opening(title_value: object, paragraph_value: object) -> str:
+    """Name the selected paper explicitly before discussing it."""
+    paragraph = _clean_english_paragraph(paragraph_value)
+    title = _clean_english_paragraph(title_value).strip(' "\u201c\u201d')
+    if not title:
+        return paragraph
+
+    opening_end = "" if title.endswith((".", "?", "!")) else "."
+    opening = f'I recently read your paper, "{title}{opening_end}"'
+    if paragraph.lower().startswith("i recently read your paper") and title in paragraph:
+        return paragraph
+
+    escaped_title = re.escape(title)
+    quoted_title = rf'["\u201c]\s*{escaped_title}[,;:]?\s*["\u201d]'
+    cleanup_patterns = [
+        (rf"^(?:Your|The)\s+[^.?!]{{0,60}}?\bpaper\b,?\s*{quoted_title}", "The paper"),
+        (rf"^(?:Your|The)\s+[^.?!]{{0,60}}?\bpaper\b,?\s*{escaped_title}", "The paper"),
+        (rf"^In\s+{quoted_title},?\s*", ""),
+        (rf"^{quoted_title}", "The paper"),
+        (rf"^{escaped_title}", "The paper"),
+    ]
+
+    remainder = paragraph
+    replaced = False
+    for pattern, replacement in cleanup_patterns:
+        remainder, count = re.subn(pattern, replacement, remainder, count=1, flags=re.IGNORECASE)
+        if count:
+            replaced = True
+            break
+
+    if not replaced:
+        remainder, count = re.subn(quoted_title, "this work", remainder, count=1)
+        if not count:
+            remainder = remainder.replace(title, "this work", 1)
+
+    remainder = remainder.lstrip(" ,;:")
+    if remainder and remainder[0].islower():
+        remainder = remainder[0].upper() + remainder[1:]
+    return f"{opening} {remainder}".strip()
+
+
 def _render_english_email(
     template: str,
     email_data: dict,
@@ -322,25 +414,36 @@ def _render_english_email(
         raise ValueError("英文邮件模板缺少主题或正文")
 
     replacements = {
+        "{{ subject }}": _clean_english_subject(email_data.get("subject")),
         "{{ professor_salutation }}": _clean_english_salutation(
             email_data.get("salutation"),
             professor_name,
         ),
         "{{ representative_work_paragraph }}": _clean_english_paragraph(
-            email_data.get("representative_work_paragraph")
+            _ensure_explicit_paper_opening(
+                email_data.get("representative_work_title"),
+                email_data.get("representative_work_paragraph"),
+            )
         ),
-        "{{ research_fit_paragraph }}": _clean_english_paragraph(
-            email_data.get("research_fit_paragraph")
+        "{{ background_bridge_paragraph }}": _clean_english_paragraph(
+            email_data.get("background_bridge_paragraph")
+        ),
+        "{{ fit_close_paragraph }}": _clean_english_paragraph(
+            email_data.get("fit_close_paragraph")
         ),
     }
     for placeholder, value in replacements.items():
-        if placeholder not in body:
+        target = subject if placeholder == "{{ subject }}" else body
+        if placeholder not in target:
             raise ValueError(f"英文邮件模板缺少占位符：{placeholder}")
         if not value:
             raise ValueError(f"英文邮件生成结果缺少字段：{placeholder}")
-        body = body.replace(placeholder, value)
+        if placeholder == "{{ subject }}":
+            subject = subject.replace(placeholder, value)
+        else:
+            body = body.replace(placeholder, value)
 
-    if "{{" in body or "}}" in body:
+    if "{{" in subject + body or "}}" in subject + body:
         raise ValueError("英文邮件模板存在未解析占位符")
     if re.search(r"\[(?:Applicant|Institution|Country|Degree|Program|Advisor|Venue|Project|Company)", subject + body):
         raise ValueError("请先将英文 example 模板复制到本地并填写个人信息")
@@ -353,8 +456,28 @@ def _render_english_email(
     return subject, "\n\n".join(paragraphs)
 
 
+def _validate_english_email_body(body: str, professor: dict) -> None:
+    """Reject structurally unsafe or untraceable English drafts."""
+    blocks = [block for block in re.split(r"\n\s*\n+", body or "") if block.strip()]
+    if len(blocks) != 6:
+        raise ValueError(f"英文邮件必须包含 6 个文本块；当前为 {len(blocks)} 个")
+    if not blocks[0].startswith("Dear Professor "):
+        raise ValueError("英文邮件称呼格式不正确")
+    if not blocks[2].startswith('I recently read your paper, "'):
+        raise ValueError("英文代表作段落没有使用规定开头")
+
+    titles = [str(paper["title"]).strip() for paper in _stored_recommended_papers(professor)]
+    if titles and not any(title and title in blocks[2] for title in titles):
+        raise ValueError("英文邮件没有逐字使用已核验的推荐论文标题")
+
+    if re.search(r"\bemail\s*:", body, re.I):
+        raise ValueError("英文邮件签名不得重复申请者邮箱")
+
+
 async def compose_emails(
     professor_ids: Optional[list[int]] = None,
+    replace_existing: bool = False,
+    run_deep_research: bool = True,
 ) -> AsyncGenerator[dict, None]:
     """
     为导师列表生成套磁邮件草稿（异步生成器）。
@@ -384,16 +507,23 @@ async def compose_emails(
         yield {"type": "error", "message": "没有找到导师数据，请先搜索或手动添加导师"}
         return
 
-    # 检查已有草稿，避免重复生成
+    # 检查已有草稿；批量重写只覆盖待发送稿，绝不修改已发送邮件。
     existing_drafts = await db.get_drafts()
     existing_prof_ids = {d["professor_id"] for d in existing_drafts}
+    pending_by_professor: dict[int, dict] = {}
+    for draft in sorted(existing_drafts, key=lambda item: int(item["id"]), reverse=True):
+        if draft.get("status") == "pending":
+            pending_by_professor.setdefault(int(draft["professor_id"]), draft)
 
-    professors = [p for p in professors if p["id"] not in existing_prof_ids]
+    if not replace_existing:
+        professors = [p for p in professors if p["id"] not in existing_prof_ids]
     if not professors:
-        yield {"type": "done", "total": 0, "message": "所有导师都已有草稿，无需重复生成"}
+        message = "没有可生成的导师" if replace_existing else "所有导师都已有草稿，无需重复生成"
+        yield {"type": "done", "total": 0, "message": message}
         return
 
-    yield {"type": "progress", "message": f"将为 {len(professors)} 位导师生成套磁邮件（含 Deep Research）..."}
+    action = "重写" if replace_existing else "生成"
+    yield {"type": "progress", "message": f"将为 {len(professors)} 位导师{action}套磁邮件（含 Deep Research）..."}
 
     llm = get_llm()
     total_created = 0
@@ -405,7 +535,11 @@ async def compose_emails(
         # ── Step 1: Deep Research ──
         yield {
             "type": "progress",
-            "message": f"🔍 Deep Research ({i+1}/{len(professors)}): {prof['name']} @ {prof['university']}",
+            "message": (
+                f"🔍 Deep Research ({i+1}/{len(professors)}): {prof['name']} @ {prof['university']}"
+                if run_deep_research
+                else f"📚 读取已核验推荐 ({i+1}/{len(professors)}): {prof['name']}"
+            ),
         }
 
         stored_recommendations = _format_stored_recommendations(prof)
@@ -413,7 +547,7 @@ async def compose_emails(
             stored_recommendations
             or "（搜索后端未配置，且暂无已保存的推荐论文）"
         )
-        if is_harness_llm(llm):
+        if run_deep_research and is_harness_llm(llm):
             try:
                 research_result = await _deep_research_professor(prof, llm)
             except Exception as e:
@@ -473,11 +607,14 @@ async def compose_emails(
 [Fixed Email Template (for context only; do not repeat its fixed paragraphs)]
 {english_template}
 
-Write only the three JSON fields requested by the system prompt. The backend will insert them into the fixed template.
+Write only the six JSON fields requested by the system prompt. The backend will insert them into the local template.
 Key requirements:
-- Use standard written academic English with no contractions. Keep it simple, concrete, and human; avoid AI-like phrasing, ornate adjectives, and generic admiration.
-- representative_work_paragraph: infer the applicant's direction, then choose ONE naturally related representative work. Among similarly relevant works, prefer the more-cited one. Give one modest directional connection, without mentioning the applicant's paper title or method name and without claiming inspiration.
-- research_fit_paragraph: state one future direction connected to the group and end by asking whether the applicant's background could fit.
+- Follow the logic of the provided reference email: a research-question subject, one influential work as the intellectual anchor, then a concise account of the applicant background that can support the question. Do not copy its wording.
+- subject: use the admission year from the applicant profile when available, then "PhD Application:" and a short professor-specific research arc or question. Do not use the applicant name or institution as the subject suffix.
+- representative_work_title: copy the exact title of the ONE verified recommendation discussed in the email. Do not shorten, paraphrase, or alter it.
+- representative_work_paragraph: state only mechanisms or findings directly supported by the supplied evidence, then explicitly frame one broader research question as the applicant's own interest. Its first sentence must explicitly say `I recently read your paper, "[exact title]."`; do not repeat the title in the next sentence. Use citation evidence or venue only to choose the paper, never as an impact claim in the email. Do not claim that the applicant's prior paper was inspired by it.
+- background_bridge_paragraph: select only the applicant experiences that genuinely support that research question. Keep all factual claims within the supplied profile; do not turn the paragraph into a CV list.
+- fit_close_paragraph: name one future direction connected to the group, mention that the CV is attached, and ask whether the applicant's background could fit. Keep the request direct and restrained.
 - salutation: return only the reliable family-name form used after "Dear Professor".
 - Never fabricate a paper title. If evidence is weak, discuss a verified direction instead.
 - Do not repeat any sentence already present in the fixed template. No bullets, lists, Markdown, or AI clichés."""
@@ -502,21 +639,32 @@ Key requirements:
                 subject = email_data.get("subject", f"PhD Application - {prof['name']}")
                 body = email_data.get("body", "")
                 body = _format_chinese_email_body(body, prof["name"])
+                _validate_chinese_email_body(body, prof)
             else:
                 subject, body = _render_english_email(
                     english_template,
                     email_data,
                     prof["name"],
                 )
+                _validate_english_email_body(body, prof)
 
-            draft = await db.create_draft({
-                "professor_id": prof["id"],
-                "subject": subject,
-                "body": body,
-                "language": lang,
-            })
+            pending = pending_by_professor.get(int(prof["id"])) if replace_existing else None
+            if pending:
+                await db.update_draft(pending["id"], {
+                    "subject": subject,
+                    "body": body,
+                    "status": "pending",
+                })
+                draft = await db.get_draft(pending["id"])
+            else:
+                draft = await db.create_draft({
+                    "professor_id": prof["id"],
+                    "subject": subject,
+                    "body": body,
+                    "language": lang,
+                })
             total_created += 1
-            yield {"type": "draft", "data": {**draft, "professor_name": prof["name"]}}
+            yield {"type": "draft", "data": {**(draft or {}), "professor_name": prof["name"]}}
 
         except json.JSONDecodeError:
             yield {"type": "progress", "message": f"⚠️ {prof['name']} 的邮件解析失败，跳过"}

@@ -89,10 +89,13 @@ export default function SettingsPage() {
   // 邮箱验证
   const [emailForm, setEmailForm] = useState({
     smtp_host: '', smtp_port: 587, smtp_username: '', smtp_password: '', smtp_use_tls: true,
+    smtp_from_name: '', smtp_cc: '',
+    smtp_proxy_enabled: false, smtp_proxy_host: 'host.docker.internal', smtp_proxy_port: 10809,
     imap_host: '', imap_port: 993, imap_username: '', imap_password: '', imap_use_ssl: true,
   })
   const [showSmtpPwd, setShowSmtpPwd] = useState(false)
   const [showImapPwd, setShowImapPwd] = useState(false)
+  const [smtpPasswordSet, setSmtpPasswordSet] = useState(false)
   const [verifying, setVerifying] = useState(false)
   const [verifyResult, setVerifyResult] = useState<any>(null)
 
@@ -134,9 +137,13 @@ export default function SettingsPage() {
         setCvStatus(cvRes.data)
         const s = emailRes.data.smtp
         const im = emailRes.data.imap
+        setSmtpPasswordSet(!!s.password_set)
         setEmailForm((prev) => ({
           ...prev,
           smtp_host: s.host, smtp_port: s.port, smtp_username: s.username, smtp_use_tls: s.use_tls,
+          smtp_from_name: s.from_name || '', smtp_cc: s.cc || '',
+          smtp_proxy_enabled: !!s.proxy_enabled,
+          smtp_proxy_host: s.proxy_host || 'host.docker.internal', smtp_proxy_port: s.proxy_port || 10809,
           imap_host: im.host, imap_port: im.port, imap_username: im.username, imap_use_ssl: im.use_ssl,
         }))
         setPromptForm(promptRes.data)
@@ -668,7 +675,7 @@ export default function SettingsPage() {
                 setVerifying(false)
               }
             }}
-            disabled={verifying || !emailForm.smtp_host || !emailForm.smtp_username || !emailForm.smtp_password}
+            disabled={verifying || !emailForm.smtp_host || !emailForm.smtp_username || (!emailForm.smtp_password && !smtpPasswordSet)}
             className="inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
           >
             {verifying ? <Loader2 className="h-4 w-4 animate-spin" /> : <Shield className="h-4 w-4" />}
@@ -718,8 +725,16 @@ export default function SettingsPage() {
               </div>
               <div>
                 <label className="block text-xs text-gray-500 mb-1">邮箱账号</label>
-                <input value={emailForm.smtp_username} onChange={(e) => setEmailForm({ ...emailForm, smtp_username: e.target.value })}
+                <input value={emailForm.smtp_username} onChange={(e) => {
+                  setEmailForm({ ...emailForm, smtp_username: e.target.value, smtp_password: '' })
+                  setSmtpPasswordSet(false)
+                }}
                   placeholder="you@example.com" className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500" />
+              </div>
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">发件人名称</label>
+                <input value={emailForm.smtp_from_name} onChange={(e) => setEmailForm({ ...emailForm, smtp_from_name: e.target.value })}
+                  placeholder="Applicant Name" className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500" />
               </div>
               <div>
                 <label className="block text-xs text-gray-500 mb-1">密码 / 授权码</label>
@@ -733,11 +748,36 @@ export default function SettingsPage() {
                   </button>
                 </div>
               </div>
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">可选抄送地址</label>
+                <input value={emailForm.smtp_cc} onChange={(e) => setEmailForm({ ...emailForm, smtp_cc: e.target.value })}
+                  placeholder="archive@example.edu" className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500" />
+                <p className="mt-1 text-xs text-gray-400">仅在发送前勾选“抄送”时使用。</p>
+              </div>
               <label className="flex items-center gap-2 text-xs text-gray-600">
                 <input type="checkbox" checked={emailForm.smtp_use_tls} onChange={(e) => setEmailForm({ ...emailForm, smtp_use_tls: e.target.checked })}
                   className="rounded border-gray-300 text-indigo-600" />
                 使用 STARTTLS
               </label>
+              <label className="flex items-center gap-2 text-xs text-gray-600">
+                <input type="checkbox" checked={emailForm.smtp_proxy_enabled} onChange={(e) => setEmailForm({ ...emailForm, smtp_proxy_enabled: e.target.checked })}
+                  className="rounded border-gray-300 text-indigo-600" />
+                通过 HTTP 代理连接 SMTP
+              </label>
+              {emailForm.smtp_proxy_enabled && (
+                <div className="grid grid-cols-3 gap-2">
+                  <div className="col-span-2">
+                    <label className="block text-xs text-gray-500 mb-1">代理地址</label>
+                    <input value={emailForm.smtp_proxy_host} onChange={(e) => setEmailForm({ ...emailForm, smtp_proxy_host: e.target.value })}
+                      placeholder="host.docker.internal" className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500" />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1">代理端口</label>
+                    <input type="number" value={emailForm.smtp_proxy_port} onChange={(e) => setEmailForm({ ...emailForm, smtp_proxy_port: parseInt(e.target.value) || 10809 })}
+                      className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500" />
+                  </div>
+                </div>
+              )}
             </div>
           </div>
 

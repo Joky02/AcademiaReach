@@ -27,9 +27,14 @@ from backend.core.models import (
 from backend.core.codex_client import get_codex_worker_status
 from backend.core.pi_client import get_pi_worker_status
 from backend.core.agent_llm import agent_invoke_options
-from backend.agents.search_agent import search_professors, enrich_professor
+from backend.agents.search_agent import (
+    enrich_professor,
+    recommend_papers_for_professor,
+    search_professors,
+)
 from backend.agents.compose_agent import compose_emails
 from backend.services.send_service import send_email, send_batch
+from backend.services.draft_review import rank_drafts
 from backend.services.reply_tracker import check_replies
 from backend.api.websocket import manager
 
@@ -239,6 +244,109 @@ async def start_enrich_prof(prof_id: int):
     }
 
 
+class PaperRecommendationRequest(BaseModel):
+    professor_ids: list[int]
+
+
+_paper_recommendation_task: Optional[asyncio.Task] = None
+_paper_recommendation_state = {
+    "running": False,
+    "total": 0,
+    "completed": 0,
+    "failed": 0,
+    "logs": [],
+}
+
+
+def _paper_recommendation_status() -> dict:
+    return {
+        **_paper_recommendation_state,
+        "logs": list(_paper_recommendation_state["logs"][-200:]),
+    }
+
+
+@router.get("/paper-recommendations/status")
+async def paper_recommendation_status():
+    return _paper_recommendation_status()
+
+
+@router.post("/paper-recommendations/start")
+async def start_paper_recommendations(req: PaperRecommendationRequest):
+    """Refresh recommendations only; professor identity and metadata remain untouched."""
+    global _paper_recommendation_task
+    if _paper_recommendation_task and not _paper_recommendation_task.done():
+        return {"message": "论文推荐任务正在运行", **_paper_recommendation_status()}
+
+    professor_ids = list(dict.fromkeys(int(value) for value in req.professor_ids))
+    if not professor_ids:
+        raise HTTPException(status_code=400, detail="请选择至少一位导师")
+
+    _paper_recommendation_state.update({
+        "running": True,
+        "total": len(professor_ids),
+        "completed": 0,
+        "failed": 0,
+        "logs": [],
+    })
+
+    async def append_log(message: str, professor_id: Optional[int] = None):
+        _paper_recommendation_state["logs"].append(message)
+        await manager.broadcast({
+            "channel": "recommend",
+            "type": "progress",
+            "professor_id": professor_id,
+            "message": message,
+        })
+
+    async def _run():
+        semaphore = asyncio.Semaphore(4)
+
+        async def process(professor_id: int):
+            async with semaphore:
+                professor = await db.get_professor(professor_id)
+                if not professor:
+                    _paper_recommendation_state["failed"] += 1
+                    await append_log(f"导师 {professor_id} 不存在", professor_id)
+                    return
+
+                async def emit(message: str):
+                    await append_log(f"{professor['name']}：{message}", professor_id)
+
+                try:
+                    result = await recommend_papers_for_professor(
+                        professor_id,
+                        progress=emit,
+                    )
+                    if result.get("success"):
+                        _paper_recommendation_state["completed"] += 1
+                    else:
+                        _paper_recommendation_state["failed"] += 1
+                        await append_log(
+                            f"{professor['name']}：{result.get('message', '推荐失败')}",
+                            professor_id,
+                        )
+                except Exception as exc:
+                    logger.exception("论文推荐任务异常: %s", professor["name"])
+                    _paper_recommendation_state["failed"] += 1
+                    await append_log(f"{professor['name']}：{exc}", professor_id)
+
+        try:
+            await asyncio.gather(*(process(professor_id) for professor_id in professor_ids))
+        finally:
+            _paper_recommendation_state["running"] = False
+            await manager.broadcast({
+                "channel": "recommend",
+                "type": "done",
+                "message": (
+                    f"论文推荐完成：{_paper_recommendation_state['completed']} 成功，"
+                    f"{_paper_recommendation_state['failed']} 失败"
+                ),
+            })
+
+    _paper_recommendation_task = asyncio.create_task(_run())
+    return {"message": "论文推荐任务已启动", **_paper_recommendation_status()}
+
+
 # ── 搜索导师 ──────────────────────────────────────────
 
 _search_task: Optional[asyncio.Task] = None
@@ -355,6 +463,15 @@ async def list_draft_summaries():
     return await db.get_draft_summaries()
 
 
+@router.get("/drafts/review")
+async def list_draft_review_queue(status: Optional[str] = "pending"):
+    from backend.core.llm import load_profile
+
+    normalized_status = status if status in {"pending", "approved", "skipped", "sent"} else None
+    rows = await db.get_draft_review_rows(status=normalized_status)
+    return rank_drafts(rows, applicant_profile=load_profile())
+
+
 @router.get("/drafts/{draft_id}")
 async def get_draft(draft_id: int):
     d = await db.get_draft(draft_id)
@@ -380,29 +497,116 @@ async def delete_draft(draft_id: int):
 
 class ComposeRequest(BaseModel):
     professor_ids: Optional[list[int]] = None
+    replace_existing: bool = False
+    run_deep_research: bool = True
+    parallelism: int = 1
+
+
+_compose_task: Optional[asyncio.Task] = None
+_compose_state = {
+    "running": False,
+    "total": 0,
+    "completed": 0,
+    "failed": 0,
+    "logs": [],
+}
+
+
+def _compose_status() -> dict:
+    return {
+        **_compose_state,
+        "logs": list(_compose_state["logs"][-200:]),
+    }
+
+
+@router.get("/compose/status")
+async def compose_status():
+    return _compose_status()
 
 
 @router.post("/compose/start")
 async def start_compose(req: ComposeRequest):
     """启动邮件生成（后台任务，进度通过 WebSocket 推送）"""
+    global _compose_task
+    if _compose_task and not _compose_task.done():
+        return {"message": "邮件生成任务正在运行", **_compose_status()}
+
+    professor_ids = (
+        list(dict.fromkeys(int(value) for value in req.professor_ids))
+        if req.professor_ids
+        else None
+    )
+    parallelism = max(1, min(int(req.parallelism), 4))
+    _compose_state.update({
+        "running": True,
+        "total": len(professor_ids) if professor_ids else 0,
+        "completed": 0,
+        "failed": 0,
+        "logs": [],
+    })
+
+    async def publish(msg: dict, include_terminal: bool = True):
+        message = str(msg.get("message") or "").strip()
+        if message:
+            _compose_state["logs"].append(message)
+        if msg.get("type") == "draft":
+            _compose_state["completed"] += 1
+        if msg.get("type") == "error" or "生成出错" in message or "解析失败" in message:
+            _compose_state["failed"] += 1
+        if include_terminal or msg.get("type") not in {"done", "error"}:
+            await manager.broadcast({"channel": "compose", **msg})
 
     async def _run():
         try:
-            async for msg in compose_emails(professor_ids=req.professor_ids):
-                await manager.broadcast({"channel": "compose", **msg})
+            if professor_ids and parallelism > 1:
+                semaphore = asyncio.Semaphore(parallelism)
+
+                async def process(professor_id: int):
+                    async with semaphore:
+                        async for msg in compose_emails(
+                            professor_ids=[professor_id],
+                            replace_existing=req.replace_existing,
+                            run_deep_research=req.run_deep_research,
+                        ):
+                            await publish(msg, include_terminal=False)
+
+                await asyncio.gather(*(process(professor_id) for professor_id in professor_ids))
+                await manager.broadcast({
+                    "channel": "compose",
+                    "type": "done",
+                    "total": _compose_state["completed"],
+                    "message": (
+                        f"邮件处理完成：{_compose_state['completed']} 成功，"
+                        f"{_compose_state['failed']} 失败"
+                    ),
+                })
+            else:
+                async for msg in compose_emails(
+                    professor_ids=professor_ids,
+                    replace_existing=req.replace_existing,
+                    run_deep_research=req.run_deep_research,
+                ):
+                    await publish(msg)
         except Exception as e:
             logger.exception("邮件生成任务异常")
+            _compose_state["failed"] += 1
             await manager.broadcast({"channel": "compose", "type": "error", "message": str(e)})
+        finally:
+            _compose_state["running"] = False
 
-    asyncio.create_task(_run())
-    return {"message": "邮件生成已启动，请通过 WebSocket 查看进度"}
+    _compose_task = asyncio.create_task(_run())
+    return {"message": "邮件生成已启动，请通过 WebSocket 查看进度", **_compose_status()}
 
 
 # ── 邮件发送 ──────────────────────────────────────────
 
+class SendRequest(BaseModel):
+    include_cc: bool = False
+
+
 @router.post("/send/{draft_id}")
-async def send_single(draft_id: int):
-    result = await send_email(draft_id)
+async def send_single(draft_id: int, req: Optional[SendRequest] = None):
+    result = await send_email(draft_id, include_cc=req.include_cc if req else False)
     if not result["success"]:
         raise HTTPException(status_code=400, detail=result["message"])
     return result
@@ -410,11 +614,12 @@ async def send_single(draft_id: int):
 
 class BatchSendRequest(BaseModel):
     draft_ids: list[int]
+    include_cc: bool = False
 
 
 @router.post("/send/batch")
 async def send_batch_endpoint(req: BatchSendRequest):
-    results = await send_batch(req.draft_ids)
+    results = await send_batch(req.draft_ids, include_cc=req.include_cc)
     return {"results": results}
 
 
@@ -881,6 +1086,11 @@ class EmailConfig(BaseModel):
     smtp_username: str
     smtp_password: str
     smtp_use_tls: bool = True
+    smtp_from_name: str = ""
+    smtp_cc: str = ""
+    smtp_proxy_enabled: bool = False
+    smtp_proxy_host: str = "host.docker.internal"
+    smtp_proxy_port: int = 10809
     imap_host: str
     imap_port: int = 993
     imap_username: str
@@ -903,6 +1113,11 @@ async def get_email_config():
             "username": smtp.get("username", ""),
             "password_set": bool(smtp.get("password", "")),
             "use_tls": smtp.get("use_tls", True),
+            "from_name": smtp.get("from_name", ""),
+            "cc": smtp.get("cc", ""),
+            "proxy_enabled": smtp.get("proxy_enabled", False),
+            "proxy_host": smtp.get("proxy_host", "host.docker.internal"),
+            "proxy_port": smtp.get("proxy_port", 10809),
         },
         "imap": {
             "host": imap.get("host", ""),
@@ -917,35 +1132,72 @@ async def get_email_config():
 @router.post("/config/email/verify")
 async def verify_email(data: EmailConfig):
     """验证 SMTP 和 IMAP 连接"""
-    import smtplib
     import imaplib
+    from backend.services.smtp_client import create_smtp_client
 
     results = {"smtp": {"ok": False, "message": ""}, "imap": {"ok": False, "message": ""}}
 
+    from backend.core.llm import load_yaml_config
+    current_cfg = load_yaml_config()
+    current_smtp = current_cfg.get("smtp", {})
+    current_imap = current_cfg.get("imap", {})
+    smtp_password = data.smtp_password or (
+        current_smtp.get("password", "")
+        if data.smtp_username == current_smtp.get("username") else ""
+    )
+    imap_password = data.imap_password or (
+        current_imap.get("password", "")
+        if data.imap_username == current_imap.get("username") else ""
+    )
+
     # 验证 SMTP
     try:
-        if data.smtp_use_tls:
-            server = smtplib.SMTP(data.smtp_host, data.smtp_port, timeout=10)
-            server.starttls()
-        else:
-            server = smtplib.SMTP_SSL(data.smtp_host, data.smtp_port, timeout=10)
-        server.login(data.smtp_username, data.smtp_password)
-        server.quit()
+        smtp_config = {
+            "host": data.smtp_host,
+            "port": data.smtp_port,
+            "use_tls": data.smtp_use_tls,
+            "proxy_enabled": data.smtp_proxy_enabled,
+            "proxy_host": data.smtp_proxy_host,
+            "proxy_port": data.smtp_proxy_port,
+        }
+
+        def verify_smtp_connection() -> None:
+            server = create_smtp_client(smtp_config, timeout=10)
+            try:
+                server.login(data.smtp_username, smtp_password)
+            finally:
+                try:
+                    server.quit()
+                except Exception:
+                    server.close()
+
+        await asyncio.to_thread(verify_smtp_connection)
         results["smtp"] = {"ok": True, "message": "SMTP 连接成功"}
     except Exception as e:
         results["smtp"] = {"ok": False, "message": f"SMTP 失败: {e}"}
 
-    # 验证 IMAP
-    try:
-        if data.imap_use_ssl:
-            mail = imaplib.IMAP4_SSL(data.imap_host, data.imap_port)
-        else:
-            mail = imaplib.IMAP4(data.imap_host, data.imap_port)
-        mail.login(data.imap_username, data.imap_password)
-        mail.logout()
-        results["imap"] = {"ok": True, "message": "IMAP 连接成功"}
-    except Exception as e:
-        results["imap"] = {"ok": False, "message": f"IMAP 失败: {e}"}
+    # IMAP 是可选能力；未配置时不阻止 SMTP 设置保存。
+    if not data.imap_host.strip() or not data.imap_username.strip():
+        results["imap"] = {"ok": True, "message": "IMAP 未配置，已跳过回复跟踪验证"}
+    else:
+        try:
+            def verify_imap_connection() -> None:
+                if data.imap_use_ssl:
+                    mail = imaplib.IMAP4_SSL(data.imap_host, data.imap_port, timeout=10)
+                else:
+                    mail = imaplib.IMAP4(data.imap_host, data.imap_port, timeout=10)
+                try:
+                    mail.login(data.imap_username, imap_password)
+                finally:
+                    try:
+                        mail.logout()
+                    except Exception:
+                        mail.shutdown()
+
+            await asyncio.to_thread(verify_imap_connection)
+            results["imap"] = {"ok": True, "message": "IMAP 连接成功"}
+        except Exception as e:
+            results["imap"] = {"ok": False, "message": f"IMAP 失败: {e}"}
 
     # 如果验证通过且要求保存
     if data.save and results["smtp"]["ok"] and results["imap"]["ok"]:
@@ -953,12 +1205,17 @@ async def verify_email(data: EmailConfig):
         cfg = load_yaml_config()
         cfg["smtp"] = {
             "host": data.smtp_host, "port": data.smtp_port,
-            "username": data.smtp_username, "password": data.smtp_password,
+            "username": data.smtp_username, "password": smtp_password,
             "use_tls": data.smtp_use_tls,
+            "from_name": data.smtp_from_name.strip(),
+            "cc": data.smtp_cc.strip(),
+            "proxy_enabled": data.smtp_proxy_enabled,
+            "proxy_host": data.smtp_proxy_host.strip(),
+            "proxy_port": data.smtp_proxy_port,
         }
         cfg["imap"] = {
             "host": data.imap_host, "port": data.imap_port,
-            "username": data.imap_username, "password": data.imap_password,
+            "username": data.imap_username, "password": imap_password,
             "use_ssl": data.imap_use_ssl, "poll_interval": 300,
         }
         with open(CONFIG_PATH, "w", encoding="utf-8") as f:

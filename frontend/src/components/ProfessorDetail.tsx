@@ -67,6 +67,16 @@ export default function ProfessorDetail({ professor, onClose, onUpdate, wsMessag
   const [composing, setComposing] = useState(false)
   const [sending, setSending] = useState<number | null>(null)
   const [sendResult, setSendResult] = useState<{ id: number; ok: boolean; msg: string } | null>(null)
+  const [ccDraftIds, setCcDraftIds] = useState<Set<number>>(new Set())
+
+  const setDraftCc = (id: number, checked: boolean) => {
+    setCcDraftIds((current) => {
+      const next = new Set(current)
+      if (checked) next.add(id)
+      else next.delete(id)
+      return next
+    })
+  }
 
   // Edit mode
   const [editing, setEditing] = useState(false)
@@ -254,9 +264,17 @@ export default function ProfessorDetail({ professor, onClose, onUpdate, wsMessag
     if (editingDraftId === null) return
     setSavingDraft(true)
     try {
-      await updateDraft(editingDraftId, draftForm)
+      const response = await updateDraft(editingDraftId, draftForm)
+      const savedDraft = response.data
+      setDrafts((current) => current.map((draft) => (
+        draft.id === editingDraftId ? { ...draft, ...savedDraft } : draft
+      )))
+      setPreviewDraft((current: any) => (
+        current?.id === editingDraftId ? { ...current, ...savedDraft } : current
+      ))
       setEditingDraftId(null)
-      await refreshRelatedData()
+    } catch (error: any) {
+      alert(error.response?.data?.detail || error.message || '草稿保存失败')
     } finally {
       setSavingDraft(false)
     }
@@ -266,7 +284,7 @@ export default function ProfessorDetail({ professor, onClose, onUpdate, wsMessag
     setSending(draftId)
     setSendResult(null)
     try {
-      await sendEmail(draftId)
+      await sendEmail(draftId, ccDraftIds.has(draftId))
       setSendResult({ id: draftId, ok: true, msg: '发送成功' })
       await refreshRelatedData()
     } catch (e: any) {
@@ -678,7 +696,9 @@ export default function ProfessorDetail({ professor, onClose, onUpdate, wsMessag
                             <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${statusColor(draft.status)}`}>
                               {statusLabel(draft.status)}
                             </span>
-                            <span className="text-[10px] text-gray-400">{draft.language === 'cn' ? '中文' : 'English'}</span>
+                            <span className="text-[10px] text-gray-400">
+                              {draft.language === 'cn' ? '中文' : 'English'}
+                            </span>
                           </div>
                           <p className="mt-2 line-clamp-2 text-sm font-medium leading-5 text-gray-800">{draft.subject}</p>
                           <p className="mt-1 line-clamp-2 text-xs leading-5 text-gray-500">{draft.body}</p>
@@ -752,6 +772,15 @@ export default function ProfessorDetail({ professor, onClose, onUpdate, wsMessag
                                   >
                                     <Pencil className="h-3.5 w-3.5" /> 编辑
                                   </button>
+                                  <label className="inline-flex items-center gap-1.5 rounded-lg border border-gray-300 px-3 py-2 text-xs text-gray-600">
+                                    <input
+                                      type="checkbox"
+                                      checked={ccDraftIds.has(previewDraft.id)}
+                                      onChange={(event) => setDraftCc(previewDraft.id, event.target.checked)}
+                                      className="rounded border-gray-300 text-emerald-600"
+                                    />
+                                    抄送
+                                  </label>
                                   <button
                                     onClick={() => handleSend(previewDraft.id)}
                                     disabled={sending === previewDraft.id || view.email.includes('@tbd')}

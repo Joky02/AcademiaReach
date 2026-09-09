@@ -1,12 +1,12 @@
 import { useState, useEffect, useCallback } from 'react'
-import { Routes, Route, NavLink } from 'react-router-dom'
+import { Routes, Route, NavLink, Navigate } from 'react-router-dom'
 import {
   LayoutDashboard, Search, FileText, Send, MessageSquareReply, Settings,
   Menu,
 } from 'lucide-react'
 import Dashboard from './pages/Dashboard'
 import Professors from './pages/Professors'
-import Drafts from './pages/Drafts'
+import Review from './pages/Review'
 import Sent from './pages/Sent'
 import Replies from './pages/Replies'
 import SettingsPage from './pages/Settings'
@@ -14,6 +14,7 @@ import SearchModal from './components/SearchModal'
 import GlobalTaskIndicator from './components/GlobalTaskIndicator'
 import {
   connectWebSocket,
+  getComposeStatus,
   getEnrichStatus,
   getSearchStatus,
   startSearch,
@@ -84,6 +85,22 @@ export default function App() {
     }
     syncSearchStatus()
     const timer = window.setInterval(syncSearchStatus, 3000)
+    return () => window.clearInterval(timer)
+  }, [])
+
+  useEffect(() => {
+    const syncComposeStatus = () => {
+      getComposeStatus()
+        .then((res) => {
+          setComposing(Boolean(res.data?.running))
+          if (Array.isArray(res.data?.logs)) {
+            setComposeLog(res.data.logs.map((item: any) => String(item)))
+          }
+        })
+        .catch(() => {})
+    }
+    syncComposeStatus()
+    const timer = window.setInterval(syncComposeStatus, 3000)
     return () => window.clearInterval(timer)
   }, [])
 
@@ -258,7 +275,8 @@ export default function App() {
                 />
               }
             />
-            <Route path="/drafts" element={<Drafts />} />
+            <Route path="/drafts" element={<Review wsMessages={wsMessages} />} />
+            <Route path="/review" element={<Navigate to="/drafts" replace />} />
             <Route path="/sent" element={<Sent />} />
             <Route path="/replies" element={<Replies />} />
             <Route path="/settings" element={<SettingsPage />} />
