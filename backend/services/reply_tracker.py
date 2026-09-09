@@ -19,6 +19,8 @@ logger = logging.getLogger(__name__)
 
 # 简单的邮箱格式校验：纯 ASCII、包含 @、域名部分有点号
 _EMAIL_RE = re.compile(r'^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$')
+_REPLY_PREFIX_RE = re.compile(r"^\s*(?:(?:re|fw|fwd|回复|答复)\s*[:：]\s*)+", re.IGNORECASE)
+MAX_SUBJECT_SCAN = 500
 
 
 def _get_imap_config() -> dict:
@@ -82,6 +84,18 @@ def _parse_msg(msg: email.message.Message) -> dict:
     return {"subject": subject, "body": body[:5000], "received_at": received_at}
 
 
+def _base_subject(value: str) -> str:
+    """Normalize reply/forward prefixes for local subject matching."""
+    return re.sub(r"\s+", " ", _REPLY_PREFIX_RE.sub("", value or "")).strip().casefold()
+
+
+def _message_bytes(fetch_result: list) -> bytes | None:
+    for item in fetch_result:
+        if isinstance(item, tuple) and len(item) > 1 and isinstance(item[1], bytes):
+            return item[1]
+    return None
+
+
 async def _check_replies_blocking() -> list[dict]:
     """
     检查收件箱中是否有导师的回复邮件。
@@ -114,10 +128,12 @@ async def _check_replies_blocking() -> list[dict]:
     # 策略 2 数据：已发送邮件的主题 → 导师（用于主题匹配）
     drafts = await db.get_drafts()
     sent_drafts = [d for d in drafts if d.get("status") == "sent" and d.get("subject")]
-    # subject 关键词 → professor_id
+    # 规范化 subject → professor_id
     subject_prof_map = {}
     for d in sent_drafts:
-        subject_prof_map[d["subject"].strip()] = d["professor_id"]
+        normalized = _base_subject(d["subject"])
+        if normalized:
+            subject_prof_map[normalized] = d["professor_id"]
 
     if not prof_email_map and not subject_prof_map:
         logger.info("没有可用于回复检查的导师邮箱或已发送邮件")
@@ -164,46 +180,47 @@ async def _check_replies_blocking() -> list[dict]:
             except Exception as e:
                 logger.error(f"[FROM] 检查 {prof_email} 的回复时出错: {e}")
 
-        # ── 策略 2：按 SUBJECT 匹配已发送邮件的回复 ──
-        for orig_subject, prof_id in subject_prof_map.items():
-            if prof_id in replied_prof_ids:
-                continue
-            try:
-                # IMAP SUBJECT 搜索需要用 UTF-8 编码处理非 ASCII 字符
-                search_subject = orig_subject
-                try:
-                    search_subject.encode("ascii")
-                    _, msg_nums = mail.search(None, f'(SUBJECT "{search_subject}")')
-                except UnicodeEncodeError:
-                    _, msg_nums = mail.search("UTF-8", f'(SUBJECT "{search_subject}")'.encode("utf-8"))
-
-                if not msg_nums[0]:
+        # ── 策略 2：读取最近邮件头，在本地匹配 SUBJECT ──
+        try:
+            _, all_msg_nums = mail.search(None, "ALL")
+            recent_nums = all_msg_nums[0].split()[-MAX_SUBJECT_SCAN:] if all_msg_nums and all_msg_nums[0] else []
+            for num in reversed(recent_nums):
+                if num in matched_msg_ids:
+                    continue
+                _, header_data = mail.fetch(num, "(BODY.PEEK[HEADER.FIELDS (SUBJECT)])")
+                raw_header = _message_bytes(header_data)
+                if not raw_header:
+                    continue
+                header = email.message_from_bytes(raw_header)
+                subject = _decode_header_value(header.get("Subject", "")).strip()
+                base_subject = _base_subject(subject)
+                if base_subject == subject.casefold():
+                    continue
+                prof_id = subject_prof_map.get(base_subject)
+                if not prof_id or prof_id in replied_prof_ids:
                     continue
 
-                for num in msg_nums[0].split():
-                    if num in matched_msg_ids:
-                        continue
-                    _, msg_data = mail.fetch(num, "(RFC822)")
-                    msg = email.message_from_bytes(msg_data[0][1])
-                    parsed = _parse_msg(msg)
-
-                    # 只匹配 "Re:" 开头的回复（排除自己发出的原始邮件）
-                    subj = parsed["subject"].strip()
-                    if not subj.lower().startswith("re:"):
-                        continue
-
-                    matched_msg_ids.add(num)
-                    reply_data = {"professor_id": prof_id, **parsed}
-                    try:
-                        saved = await db.create_reply(reply_data)
-                        new_replies.append(saved)
-                        await db.update_professor_reply_status(prof_id, "replied")
-                        replied_prof_ids.add(prof_id)
-                        logger.info(f"[SUBJECT] 匹配到回复: prof_id={prof_id}, subject={subj[:50]}")
-                    except Exception:
-                        pass
-            except Exception as e:
-                logger.error(f"[SUBJECT] 检查主题匹配时出错: {e}")
+                _, msg_data = mail.fetch(num, "(BODY.PEEK[])")
+                raw_message = _message_bytes(msg_data)
+                if not raw_message:
+                    continue
+                parsed = _parse_msg(email.message_from_bytes(raw_message))
+                matched_msg_ids.add(num)
+                reply_data = {"professor_id": prof_id, **parsed}
+                try:
+                    saved = await db.create_reply(reply_data)
+                    new_replies.append(saved)
+                    await db.update_professor_reply_status(prof_id, "replied")
+                    replied_prof_ids.add(prof_id)
+                    logger.info(
+                        "[SUBJECT] 匹配到回复: prof_id=%s, subject=%s",
+                        prof_id,
+                        subject[:50],
+                    )
+                except Exception:
+                    logger.exception("[SUBJECT] 保存回复失败: prof_id=%s", prof_id)
+        except Exception as e:
+            logger.error(f"[SUBJECT] 检查主题匹配时出错: {e}")
 
         mail.logout()
 

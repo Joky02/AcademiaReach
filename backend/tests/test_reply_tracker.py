@@ -9,6 +9,16 @@ from backend.services import reply_tracker
 
 
 class ReplyTrackerTests(unittest.IsolatedAsyncioTestCase):
+    def test_base_subject_handles_common_reply_prefixes(self):
+        self.assertEqual(
+            reply_tracker._base_subject("Re: RE： 2027 PhD Application: Reliable Agents"),
+            "2027 phd application: reliable agents",
+        )
+        self.assertEqual(
+            reply_tracker._base_subject("回复：博士申请咨询：可靠智能体"),
+            "博士申请咨询：可靠智能体",
+        )
+
     async def test_check_replies_runs_outside_event_loop_thread(self):
         event_loop_thread = threading.get_ident()
 
